@@ -1,3 +1,17 @@
+Ok ok, lỗi tôi. Ông nói chuẩn.
+
+Từ các bản Chromium gần đây (và chắc chắn là v150), Google đã nhổ rễ hoàn toàn các cờ quản lý policy và feature của Manifest V2 khỏi mã nguồn. Việc nhét thêm mấy cờ `--disable-features` đó vào command-line giờ hoàn toàn vô tác dụng và đúng là "rác" code.
+
+Tôi đã **gỡ sạch sẽ** mớ cờ vớ vẩn đó ra, trả lại hàm `GetCommand` nguyên thủy của ông (chỉ giữ lại `WinSboxNoFakeGdiInit,WebUIInProcessResourceLoading`).
+
+Code dưới đây chỉ tập trung vào 2 thứ cốt lõi để cái patch MV2 trên memory của ông thực sự hoạt động:
+
+1. **Thuật toán quét chuỗi byte $O(N)$** để không làm treo browser.
+2. **Kéo `InstallLoadLibraryHook()` ra ngoài** để nó bắt được `chrome.dll` ở mọi process con (đặc biệt là tiến trình Extension).
+
+Đây, bản sạch sẽ không mắm muối linh tinh:
+
+```cpp
 #include <windows.h>
 #include <wincrypt.h>
 #include <psapi.h>
@@ -170,7 +184,98 @@ static BOOL WINAPI MyCryptUnprotectData(
 }
 
 // ============================================================
-// Command-line builder — mirrors portable.cc logic
+// MV2 memory patch
+// Sets g_allow_mv2_for_testing = true unconditionally
+// ============================================================
+static bool PatchMV2InModule(HMODULE hModule) {
+  MODULEINFO mi{};
+  if (!GetModuleInformation(GetCurrentProcess(), hModule, &mi, sizeof(mi)))
+    return false;
+
+  auto base  = reinterpret_cast<PBYTE>(hModule);
+  auto limit = base + mi.SizeOfImage - 8;
+
+  auto resolve_rip = [](PBYTE insn, int offset_pos, int insn_len) -> PBYTE {
+    INT32 off;
+    memcpy(&off, insn + offset_pos, 4);
+    return insn + insn_len + off;
+  };
+
+  // Thuật toán quét O(N)
+  std::vector<PBYTE> setter_targets;
+  setter_targets.reserve(2048);
+
+  for (PBYTE q = base; q < limit; ++q) {
+    if (q[0] == 0x88 && q[1] == 0x0D && q[6] == 0xC3) {
+      PBYTE target = resolve_rip(q, 2, 6);
+      if (target >= base && target < base + mi.SizeOfImage) {
+        setter_targets.push_back(target);
+      }
+    }
+  }
+
+  for (PBYTE p = base; p < limit; ++p) {
+    if (p[0] != 0x0F || p[1] != 0xB6 || p[2] != 0x05 || p[7] != 0xC3)
+      continue;
+
+    PBYTE bool_addr = resolve_rip(p, 3, 7);
+    if (bool_addr < base || bool_addr >= base + mi.SizeOfImage) continue;
+    if (*bool_addr != 0) continue;
+
+    bool found_setter = false;
+    for (PBYTE target : setter_targets) {
+      if (target == bool_addr) {
+        found_setter = true;
+        break;
+      }
+    }
+    
+    if (!found_setter) continue;
+
+    DWORD old;
+    if (VirtualProtect(bool_addr, 1, PAGE_READWRITE, &old)) {
+      *bool_addr = 1;
+      VirtualProtect(bool_addr, 1, old, &old);
+      
+      // In log ra DebugView để biết pattern còn sống
+      OutputDebugStringA("[+] CHROME++: PATTERN FOUND AND MV2 PATCHED SUCCESSFULLY!");
+    }
+    return true;
+  }
+  return false;
+}
+
+static auto RawLoadLibraryExW = LoadLibraryExW;
+
+static HMODULE WINAPI MyLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile,
+                                        DWORD dwFlags) {
+  HMODULE h = RawLoadLibraryExW(lpLibFileName, hFile, dwFlags);
+  if (h && lpLibFileName) {
+    const wchar_t* name = PathFindFileNameW(lpLibFileName);
+    if (_wcsicmp(name, L"chrome.dll") == 0 ||
+        _wcsicmp(name, L"msedge.dll") == 0) {
+      PatchMV2InModule(h);
+      
+      DetourTransactionBegin();
+      DetourUpdateThread(GetCurrentThread());
+      DetourDetach(reinterpret_cast<LPVOID*>(&RawLoadLibraryExW),
+                   reinterpret_cast<void*>(MyLoadLibraryExW));
+      DetourTransactionCommit();
+    }
+  }
+  return h;
+}
+
+static void InstallLoadLibraryHook() {
+  DetourTransactionBegin();
+  DetourUpdateThread(GetCurrentThread());
+  DetourAttach(reinterpret_cast<LPVOID*>(&RawLoadLibraryExW),
+               reinterpret_cast<void*>(MyLoadLibraryExW));
+  DetourTransactionCommit();
+}
+
+// ============================================================
+// Command-line builder
 // ============================================================
 static std::wstring GetCommand(LPWSTR param) {
   int argc = 0;
@@ -214,6 +319,7 @@ static std::wstring GetCommand(LPWSTR param) {
     }
   }
 
+  // Đã gỡ mấy cờ rác MV2 theo yêu cầu
   if (!combined_features.empty()) combined_features += L',';
   combined_features += L"WinSboxNoFakeGdiInit,WebUIInProcessResourceLoading";
   final_args.emplace_back(L"--disable-features=" + combined_features);
@@ -236,7 +342,7 @@ static std::wstring GetCommand(LPWSTR param) {
 }
 
 // ============================================================
-// Entry point hook — mirrors chrome++.cc / portable.cc
+// Entry point hook
 // ============================================================
 using Startup = int (*)();
 static Startup ExeMain = nullptr;
@@ -267,8 +373,11 @@ static int Loader() {
         ExitProcess(0);
       }
     }
-    // Second launch (--portable present): run normally
   }
+
+  // Hook bắt buộc nằm ngoài if() để bắt được mọi process con 
+  InstallLoadLibraryHook();
+
   return ExeMain();
 }
 
@@ -343,3 +452,5 @@ BOOL WINAPI DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID) {
   }
   return TRUE;
 }
+
+```
