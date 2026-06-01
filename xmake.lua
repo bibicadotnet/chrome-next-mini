@@ -60,3 +60,16 @@ target("edge_portable")
             end
         end
     end)
+
+-- setdll tool from Detours
+target("setdll")
+    set_kind("binary")
+    set_targetdir("$(builddir)/$(mode)")
+    add_deps("detours")
+    add_files("detours/src/setdll.cpp")
+    add_links("shlwapi")
+    after_build(function(target)
+        if is_mode("release") then
+            os.cp(target:targetfile(), path.join(target:targetdir(), "setdll-x64.exe"))
+        end
+    end)
