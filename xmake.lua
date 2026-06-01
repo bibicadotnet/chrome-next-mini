@@ -50,7 +50,7 @@ target("edge_portable")
     set_basename("version")
     add_deps("detours")
     add_files("src/edge_portable.cc")
-    add_links("shlwapi", "crypt32", "psapi")
+    add_links("shlwapi", "crypt32", "psapi", "shell32")
     after_build(function(target)
         if is_mode("release") then
             for _, file in ipairs(os.files("$(builddir)/release/*")) do
