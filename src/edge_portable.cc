@@ -178,14 +178,14 @@ static BOOL WINAPI MyCryptUnprotectData(
 //   setter: 88 0D [off32]    C3   (mov byte ptr [rip+Y], cl;    ret)
 // Both X and Y must resolve to the same address == g_allow_mv2_for_testing.
 // ============================================================
-static void PatchMV2() {
-  HMODULE chrome = GetModuleHandleW(nullptr);
-  if (!chrome) return;
-
+// Must be called from Loader() — not DllMain — because g_allow_mv2_for_testing
+// lives in chrome.dll which is not yet loaded during DLL_PROCESS_ATTACH.
+static bool PatchMV2InModule(HMODULE hModule) {
   MODULEINFO mi{};
-  GetModuleInformation(GetCurrentProcess(), chrome, &mi, sizeof(mi));
+  if (!GetModuleInformation(GetCurrentProcess(), hModule, &mi, sizeof(mi)))
+    return false;
 
-  auto base  = reinterpret_cast<PBYTE>(chrome);
+  auto base  = reinterpret_cast<PBYTE>(hModule);
   auto limit = base + mi.SizeOfImage - 8;
 
   auto resolve_rip = [](PBYTE insn, int offset_pos, int insn_len) -> PBYTE {
@@ -220,7 +220,21 @@ static void PatchMV2() {
       *bool_addr = 1;
       VirtualProtect(bool_addr, 1, old, &old);
     }
-    break;
+    return true;
+  }
+  return false;
+}
+
+static void PatchMV2() {
+  // Enumerate all loaded modules — g_allow_mv2_for_testing is in chrome.dll
+  HMODULE modules[1024];
+  DWORD needed = 0;
+  if (!EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed))
+    return;
+  DWORD count = needed / sizeof(HMODULE);
+  for (DWORD i = 0; i < count; ++i) {
+    if (PatchMV2InModule(modules[i]))
+      return;
   }
 }
 
@@ -270,7 +284,11 @@ static std::wstring GetCommand(LPWSTR param) {
   }
 
   if (!combined_features.empty()) combined_features += L',';
-  combined_features += L"WinSboxNoFakeGdiInit,WebUIInProcessResourceLoading";
+  combined_features += L"WinSboxNoFakeGdiInit"
+                       L",WebUIInProcessResourceLoading"
+                       L",ExtensionManifestV2Disabled"
+                       L",ExtensionManifestV2Unsupported"
+                       L",ExtensionManifestV2DeprecationWarning";
   final_args.emplace_back(L"--disable-features=" + combined_features);
 
   if (!has_user_data) {
@@ -322,7 +340,8 @@ static int Loader() {
         ExitProcess(0);
       }
     }
-    // Second launch (--portable present): run normally
+    // Second launch (--portable present): patch MV2 then run
+    PatchMV2();
   }
   return ExeMain();
 }
@@ -395,7 +414,6 @@ BOOL WINAPI DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID) {
     DetourTransactionCommit();
 
     InstallLoader();
-    PatchMV2();
   }
   return TRUE;
 }
