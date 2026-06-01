@@ -242,8 +242,7 @@ static HMODULE WINAPI MyLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile,
                                         DWORD dwFlags) {
   HMODULE h = RawLoadLibraryExW(lpLibFileName, hFile, dwFlags);
   if (h && lpLibFileName) {
-    const wchar_t* name = wcsrchr(lpLibFileName, L'\');
-    name = name ? name + 1 : lpLibFileName;
+    const wchar_t* name = PathFindFileNameW(lpLibFileName);
     if (_wcsicmp(name, L"chrome.dll") == 0 ||
         _wcsicmp(name, L"msedge.dll") == 0) {
       PatchMV2InModule(h);
