@@ -267,7 +267,10 @@ static int Loader() {
         ExitProcess(0);
       }
     }
-    // Second launch (--portable present): run normally
+    } else {
+      // Second launch (--portable present): apply patches then run
+      PatchMV2();
+    }
   }
   return ExeMain();
 }
@@ -317,6 +320,47 @@ static void LoadSysDll(HINSTANCE hModule) {
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(reinterpret_cast<LPVOID*>(&stub), real_fn);
     DetourTransactionCommit();
+  }
+}
+
+// ============================================================
+// MV2 patch — set g_allow_mv2_for_testing = true at runtime
+//
+// In release builds, IsAllowMV2ForTestingSet() compiles to:
+//   movzx eax, byte ptr [rip + offset]   ; 0F B6 05 xx xx xx xx
+//   ret                                   ; C3
+// We scan the main module for this 8-byte pattern, follow the
+// RIP-relative offset to find g_allow_mv2_for_testing, then set it.
+// ============================================================
+static void PatchMV2() {
+  HMODULE hMod = GetModuleHandleW(nullptr);
+  MODULEINFO mi{};
+  if (!GetModuleInformation(GetCurrentProcess(), hMod, &mi, sizeof(mi)))
+    return;
+
+  auto base  = reinterpret_cast<PBYTE>(hMod);
+  auto limit = base + mi.SizeOfImage - 8;
+
+  for (PBYTE p = base; p < limit; ++p) {
+    // Pattern: movzx eax, byte ptr [rip+??] ; ret
+    if (p[0] == 0x0F && p[1] == 0xB6 && p[2] == 0x05 && p[7] == 0xC3) {
+      // RIP-relative: address = p+7 + *(int32*)(p+3)
+      int32_t rel = *reinterpret_cast<int32_t*>(p + 3);
+      PBYTE target = p + 7 + rel;
+
+      // Sanity: must be within module, currently 0 (false)
+      if (target < base || target >= base + mi.SizeOfImage) continue;
+      if (*target != 0x00) continue;
+
+      // Verify: a nearby byte before this function is also typical
+      // (this bool should be in .data/.bss — writable section)
+      MEMORY_BASIC_INFORMATION mbi{};
+      if (!VirtualQuery(target, &mbi, sizeof(mbi))) continue;
+      if (!(mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY))) continue;
+
+      *target = 0x01;  // true
+      return;
+    }
   }
 }
 
