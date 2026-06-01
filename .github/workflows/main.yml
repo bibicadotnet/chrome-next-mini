@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+
+      - name: Configure
+        run: xmake f -p windows -a x64 -m release
+
+      - name: Build
+        run: xmake
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "edge_portable-${{ github.ref_name }}"
+          New-Item -ItemType Directory $out
+          Copy-Item build/release/version.dll $out/
+          Copy-Item chrome++.ini              $out/
+          Copy-Item README.md                 $out/
+          Compress-Archive -Path $out -DestinationPath "$out.zip"
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: edge_portable-${{ github.ref_name }}.zip
+          generate_release_notes: true
