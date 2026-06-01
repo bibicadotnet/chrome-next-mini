@@ -27,6 +27,17 @@ jobs:
       - name: Install xmake
         uses: xmake-io/github-action-setup-xmake@v1
 
+      - name: Build detours tools (setdll)
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          $vcvars = "$vs\VC\Auxiliary\Build\vcvars64.bat"
+          cmd /c "`"$vcvars`" && nmake /nologo /f detours\src\makefile DETOURS_TARGET_PROCESSOR=X64" 2>&1
+          # setdll.exe nằm ở detours\bin.X64\
+          Copy-Item detours\bin.X64\setdll.exe setdll-x64.exe
+
       - name: Configure
         run: xmake f -p windows -a x64 -m release
 
@@ -40,6 +51,7 @@ jobs:
           $out = "edge_portable-$tag"
           New-Item -ItemType Directory $out
           Copy-Item build\release\version.dll $out\
+          Copy-Item setdll-x64.exe            $out\
           Copy-Item chrome++.ini              $out\
           Get-ChildItem README.md -ErrorAction SilentlyContinue | Copy-Item -Destination $out\
           Compress-Archive -Path $out -DestinationPath "$out.zip"
