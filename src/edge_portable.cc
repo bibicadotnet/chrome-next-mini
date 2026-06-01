@@ -170,102 +170,6 @@ static BOOL WINAPI MyCryptUnprotectData(
 }
 
 // ============================================================
-// MV2 patch: set g_allow_mv2_for_testing = true
-// https://source.chromium.org/chromium/chromium/src/+/main:extensions/browser/manifest_v2_experiment_manager.cc;l=41
-//
-// Locate getter+setter pair that both reference the same bool address:
-//   getter: 0F B6 05 [off32] C3   (movzx eax, byte ptr [rip+X]; ret)
-//   setter: 88 0D [off32]    C3   (mov byte ptr [rip+Y], cl;    ret)
-// Both X and Y must resolve to the same address == g_allow_mv2_for_testing.
-// ============================================================
-// Must be called from Loader() — not DllMain — because g_allow_mv2_for_testing
-// lives in chrome.dll which is not yet loaded during DLL_PROCESS_ATTACH.
-static bool PatchMV2InModule(HMODULE hModule) {
-  MODULEINFO mi{};
-  if (!GetModuleInformation(GetCurrentProcess(), hModule, &mi, sizeof(mi)))
-    return false;
-
-  auto base  = reinterpret_cast<PBYTE>(hModule);
-  auto limit = base + mi.SizeOfImage - 8;
-
-  auto resolve_rip = [](PBYTE insn, int offset_pos, int insn_len) -> PBYTE {
-    INT32 off;
-    memcpy(&off, insn + offset_pos, 4);
-    return insn + insn_len + off;
-  };
-
-  for (PBYTE p = base; p < limit; ++p) {
-    // getter: 0F B6 05 [off32] C3
-    if (p[0] != 0x0F || p[1] != 0xB6 || p[2] != 0x05 || p[7] != 0xC3)
-      continue;
-
-    PBYTE bool_addr = resolve_rip(p, 3, 7);
-    if (bool_addr < base || bool_addr >= base + mi.SizeOfImage) continue;
-    if (*bool_addr != 0) continue;
-
-    // Find matching setter: 88 0D [off32] C3 pointing to same address
-    bool found_setter = false;
-    for (PBYTE q = base; q < limit; ++q) {
-      if (q[0] == 0x88 && q[1] == 0x0D && q[6] == 0xC3) {
-        if (resolve_rip(q, 2, 6) == bool_addr) {
-          found_setter = true;
-          break;
-        }
-      }
-    }
-    if (!found_setter) continue;
-
-    DWORD old;
-    if (VirtualProtect(bool_addr, 1, PAGE_READWRITE, &old)) {
-      *bool_addr = 1;
-      VirtualProtect(bool_addr, 1, old, &old);
-    }
-    return true;
-  }
-  return false;
-}
-
-static void PatchMV2() {
-  static const wchar_t* kCandidates[] = {
-    L"chrome.dll", L"msedge.dll", nullptr
-  };
-  for (int i = 0; kCandidates[i]; ++i) {
-    HMODULE h = GetModuleHandleW(kCandidates[i]);
-    if (h && PatchMV2InModule(h)) return;
-  }
-}
-
-// Hook LoadLibraryExW to catch chrome.dll/msedge.dll the moment they load
-static auto RawLoadLibraryExW = LoadLibraryExW;
-
-static HMODULE WINAPI MyLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile,
-                                        DWORD dwFlags) {
-  HMODULE h = RawLoadLibraryExW(lpLibFileName, hFile, dwFlags);
-  if (h && lpLibFileName) {
-    const wchar_t* name = PathFindFileNameW(lpLibFileName);
-    if (_wcsicmp(name, L"chrome.dll") == 0 ||
-        _wcsicmp(name, L"msedge.dll") == 0) {
-      PatchMV2InModule(h);
-      // Unhook ourselves — only need to patch once
-      DetourTransactionBegin();
-      DetourUpdateThread(GetCurrentThread());
-      DetourDetach(reinterpret_cast<LPVOID*>(&RawLoadLibraryExW),
-                   reinterpret_cast<void*>(MyLoadLibraryExW));
-      DetourTransactionCommit();
-    }
-  }
-  return h;
-}
-
-static void InstallLoadLibraryHook() {
-  DetourTransactionBegin();
-  DetourUpdateThread(GetCurrentThread());
-  DetourAttach(reinterpret_cast<LPVOID*>(&RawLoadLibraryExW),
-               reinterpret_cast<void*>(MyLoadLibraryExW));
-  DetourTransactionCommit();
-}
-
-// ============================================================
 // Command-line builder — mirrors portable.cc logic
 // ============================================================
 static std::wstring GetCommand(LPWSTR param) {
@@ -311,11 +215,7 @@ static std::wstring GetCommand(LPWSTR param) {
   }
 
   if (!combined_features.empty()) combined_features += L',';
-  combined_features += L"WinSboxNoFakeGdiInit"
-                       L",WebUIInProcessResourceLoading"
-                       L",ExtensionManifestV2Disabled"
-                       L",ExtensionManifestV2Unsupported"
-                       L",ExtensionManifestV2DeprecationWarning";
+  combined_features += L"WinSboxNoFakeGdiInit,WebUIInProcessResourceLoading";
   final_args.emplace_back(L"--disable-features=" + combined_features);
 
   if (!has_user_data) {
@@ -367,9 +267,7 @@ static int Loader() {
         ExitProcess(0);
       }
     }
-    // Second launch (--portable present): install LoadLibrary hook to patch MV2
-    // when chrome.dll/msedge.dll is loaded (they load after ExeMain returns)
-    InstallLoadLibraryHook();
+    // Second launch (--portable present): run normally
   }
   return ExeMain();
 }
