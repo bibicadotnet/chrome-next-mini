@@ -241,7 +241,7 @@ static int Loader() {
     std::vector<wchar_t> buf(new_cmdline.begin(), new_cmdline.end());
     buf.push_back(L'\0');
 
-    STARTUPINFOW si = { sizeof(si), .dwFlags = STARTF_USESHOWWINDOW,
+    STARTUPINFOW si = { .cb = sizeof(si), .dwFlags = STARTF_USESHOWWINDOW,
                         .wShowWindow = SW_SHOWNORMAL };
     PROCESS_INFORMATION pi{};
     std::wstring app_dir = GetAppDir();
