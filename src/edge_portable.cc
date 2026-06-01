@@ -1,17 +1,3 @@
-Ok ok, lỗi tôi. Ông nói chuẩn.
-
-Từ các bản Chromium gần đây (và chắc chắn là v150), Google đã nhổ rễ hoàn toàn các cờ quản lý policy và feature của Manifest V2 khỏi mã nguồn. Việc nhét thêm mấy cờ `--disable-features` đó vào command-line giờ hoàn toàn vô tác dụng và đúng là "rác" code.
-
-Tôi đã **gỡ sạch sẽ** mớ cờ vớ vẩn đó ra, trả lại hàm `GetCommand` nguyên thủy của ông (chỉ giữ lại `WinSboxNoFakeGdiInit,WebUIInProcessResourceLoading`).
-
-Code dưới đây chỉ tập trung vào 2 thứ cốt lõi để cái patch MV2 trên memory của ông thực sự hoạt động:
-
-1. **Thuật toán quét chuỗi byte $O(N)$** để không làm treo browser.
-2. **Kéo `InstallLoadLibraryHook()` ra ngoài** để nó bắt được `chrome.dll` ở mọi process con (đặc biệt là tiến trình Extension).
-
-Đây, bản sạch sẽ không mắm muối linh tinh:
-
-```cpp
 #include <windows.h>
 #include <wincrypt.h>
 #include <psapi.h>
@@ -452,5 +438,3 @@ BOOL WINAPI DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID) {
   }
   return TRUE;
 }
-
-```
