@@ -122,7 +122,6 @@ static std::wstring QuoteIfNeeded(const std::wstring& s) {
 static auto RawUpdateProcThreadAttribute = UpdateProcThreadAttribute;
 
 static const DWORD64 kBlockNonMicrosoftBinariesAlwaysOn = 0x00000001ui64 << 44;
-static const DWORD64 kWin32kSystemCallDisableAlwaysOn   = 0x00000001ui64 << 28;
 
 static BOOL WINAPI MyUpdateProcThreadAttribute(
     LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
@@ -170,6 +169,97 @@ static BOOL WINAPI MyCryptUnprotectData(
 }
 
 // ============================================================
+// MV2 patch: set g_allow_mv2_for_testing = true
+// https://source.chromium.org/chromium/chromium/src/+/main:extensions/browser/manifest_v2_experiment_manager.cc;l=41
+//
+// g_allow_mv2_for_testing lives in chrome.dll / msedge.dll, not the exe.
+// It has exactly two trivial accessors compiled to:
+//   getter: 0F B6 05 [off32] C3   movzx eax, byte ptr [rip+X]; ret
+//   setter: 88 0D [off32]    C3   mov byte ptr [rip+Y], cl;    ret
+// Both offsets resolve to the same address. We find the getter, verify
+// the setter also points there, then set the byte to 1.
+//
+// Called from InstallLoadLibraryHook() which fires the moment chrome.dll
+// or msedge.dll is mapped — before any code in that DLL runs.
+// ============================================================
+static bool PatchMV2InModule(HMODULE hModule) {
+  MODULEINFO mi{};
+  if (!GetModuleInformation(GetCurrentProcess(), hModule, &mi, sizeof(mi)))
+    return false;
+
+  auto base  = reinterpret_cast<PBYTE>(hModule);
+  auto limit = base + mi.SizeOfImage - 8;
+
+  auto resolve_rip = [](PBYTE insn, int offset_pos, int insn_len) -> PBYTE {
+    INT32 off;
+    memcpy(&off, insn + offset_pos, 4);
+    return insn + insn_len + off;
+  };
+
+  for (PBYTE p = base; p < limit; ++p) {
+    // getter: 0F B6 05 [off32] C3
+    if (p[0] != 0x0F || p[1] != 0xB6 || p[2] != 0x05 || p[7] != 0xC3)
+      continue;
+
+    PBYTE bool_addr = resolve_rip(p, 3, 7);
+    if (bool_addr < base || bool_addr >= base + mi.SizeOfImage) continue;
+    if (*bool_addr != 0) continue;
+
+    // Verify matching setter: 88 0D [off32] C3 pointing to same address
+    bool found_setter = false;
+    for (PBYTE q = base; q < limit; ++q) {
+      if (q[0] == 0x88 && q[1] == 0x0D && q[6] == 0xC3) {
+        if (resolve_rip(q, 2, 6) == bool_addr) {
+          found_setter = true;
+          break;
+        }
+      }
+    }
+    if (!found_setter) continue;
+
+    DWORD old;
+    if (VirtualProtect(bool_addr, 1, PAGE_READWRITE, &old)) {
+      *bool_addr = 1;
+      VirtualProtect(bool_addr, 1, old, &old);
+    }
+    return true;
+  }
+  return false;
+}
+
+// Hook LoadLibraryExW to catch chrome.dll/msedge.dll the moment they load.
+// These DLLs load after ExeMain() is called, so we can't patch in DllMain
+// or even at the start of Loader() — we must intercept the load itself.
+static auto RawLoadLibraryExW = LoadLibraryExW;
+
+static HMODULE WINAPI MyLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile,
+                                        DWORD dwFlags) {
+  HMODULE h = RawLoadLibraryExW(lpLibFileName, hFile, dwFlags);
+  if (h && lpLibFileName) {
+    const wchar_t* name = PathFindFileNameW(lpLibFileName);
+    if (_wcsicmp(name, L"chrome.dll") == 0 ||
+        _wcsicmp(name, L"msedge.dll") == 0) {
+      PatchMV2InModule(h);
+      // Unhook — only need to patch once
+      DetourTransactionBegin();
+      DetourUpdateThread(GetCurrentThread());
+      DetourDetach(reinterpret_cast<LPVOID*>(&RawLoadLibraryExW),
+                   reinterpret_cast<void*>(MyLoadLibraryExW));
+      DetourTransactionCommit();
+    }
+  }
+  return h;
+}
+
+static void InstallLoadLibraryHook() {
+  DetourTransactionBegin();
+  DetourUpdateThread(GetCurrentThread());
+  DetourAttach(reinterpret_cast<LPVOID*>(&RawLoadLibraryExW),
+               reinterpret_cast<void*>(MyLoadLibraryExW));
+  DetourTransactionCommit();
+}
+
+// ============================================================
 // Command-line builder — mirrors portable.cc logic
 // ============================================================
 static std::wstring GetCommand(LPWSTR param) {
@@ -178,12 +268,10 @@ static std::wstring GetCommand(LPWSTR param) {
 
   std::vector<std::wstring> args;
   args.reserve(argc + 16);
-  // skip argv[0] (exe path)
   for (int i = 1; i < argc; ++i)
     args.emplace_back(argv[i]);
   if (argv) LocalFree(argv);
 
-  // Append args from ini command_line=
   std::wstring extra = GetIniString(L"general", L"command_line");
   if (!extra.empty()) {
     std::wstring fake = L"x " + extra;
@@ -196,7 +284,6 @@ static std::wstring GetCommand(LPWSTR param) {
 
   args.emplace_back(L"--portable");
 
-  // Merge all --disable-features into one
   std::wstring combined_features;
   std::vector<std::wstring> final_args;
   final_args.reserve(args.size() + 4);
@@ -236,50 +323,7 @@ static std::wstring GetCommand(LPWSTR param) {
 }
 
 // ============================================================
-// MV2 patch — set g_allow_mv2_for_testing = true at runtime
-//
-// In release builds, IsAllowMV2ForTestingSet() compiles to:
-//   movzx eax, byte ptr [rip + offset]   ; 0F B6 05 xx xx xx xx
-//   ret                                   ; C3
-// We scan the main module for this 8-byte pattern, follow the
-// RIP-relative offset to find g_allow_mv2_for_testing, then set it.
-// ============================================================
-// ============================================================
-// MV2 patch — set g_allow_mv2_for_testing = true
-//
-// ShouldDisableLegacyExtensions() reads this bool via:
-//   movzx eax, byte ptr [rip+offset]   ; 0F B6 05 xx xx xx xx
-//   test  eax, eax                     ; 85 C0
-// Scan for this pattern, follow the RIP-relative offset to the bool,
-// verify it's in a writable section and currently false, then set to true.
-// ============================================================
-static void PatchMV2() {
-  HMODULE hMod = GetModuleHandleW(nullptr);
-  MODULEINFO mi{};
-  if (!GetModuleInformation(GetCurrentProcess(), hMod, &mi, sizeof(mi)))
-    return;
-
-  auto base  = reinterpret_cast<PBYTE>(hMod);
-  auto limit = base + mi.SizeOfImage - 16;
-
-  for (PBYTE p = base; p < limit; ++p) {
-    if (p[0] == 0x0F && p[1] == 0xB6 && p[2] == 0x05 &&  // movzx eax, byte[rip+?]
-        p[7] == 0x85 && p[8] == 0xC0) {                   // test eax, eax
-      int32_t rel    = *reinterpret_cast<int32_t*>(p + 3);
-      PBYTE   target = p + 7 + rel;
-      if (target < base || target >= base + mi.SizeOfImage) continue;
-      if (*target != 0x00) continue;
-      MEMORY_BASIC_INFORMATION mbi{};
-      if (!VirtualQuery(target, &mbi, sizeof(mbi))) continue;
-      if (!(mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY))) continue;
-      *target = 0x01;
-      return;
-    }
-  }
-}
-
-// ============================================================
-// Entry point hook — mirrors chrome++.cc / portable.cc
+// Entry point hook
 // ============================================================
 using Startup = int (*)();
 static Startup ExeMain = nullptr;
@@ -288,7 +332,6 @@ static int Loader() {
   LPWSTR param = GetCommandLineW();
   if (!wcsstr(param, L"-type=")) {
     if (!wcsstr(param, L"--portable")) {
-      // First launch: relaunch with portable args
       wchar_t exe_path[MAX_PATH];
       GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
 
@@ -310,8 +353,8 @@ static int Loader() {
         ExitProcess(0);
       }
     } else {
-      // Second launch (--portable present): apply runtime patches
-      PatchMV2();
+      // Second launch: install hook so we patch chrome.dll the moment it loads
+      InstallLoadLibraryHook();
     }
   }
   return ExeMain();
@@ -331,7 +374,7 @@ static void InstallLoader() {
 }
 
 // ============================================================
-// Forward real version.dll — mirrors hijack.cc LoadVersion()
+// Forward real version.dll
 // ============================================================
 static void LoadSysDll(HINSTANCE hModule) {
   wchar_t sys_dir[MAX_PATH];
