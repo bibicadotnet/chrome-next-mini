@@ -39,9 +39,9 @@ jobs:
           $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
           $out = "edge_portable-$tag"
           New-Item -ItemType Directory $out
-          Copy-Item build/release/version.dll $out/
-          Copy-Item chrome++.ini              $out/
-          Copy-Item README.md                 $out/
+          Copy-Item build\release\version.dll $out\
+          Copy-Item chrome++.ini              $out\
+          Get-ChildItem README.md -ErrorAction SilentlyContinue | Copy-Item -Destination $out\
           Compress-Archive -Path $out -DestinationPath "$out.zip"
           echo "TAG=$tag" >> $env:GITHUB_ENV
 
