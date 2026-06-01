@@ -236,6 +236,49 @@ static std::wstring GetCommand(LPWSTR param) {
 }
 
 // ============================================================
+// MV2 patch — set g_allow_mv2_for_testing = true at runtime
+//
+// In release builds, IsAllowMV2ForTestingSet() compiles to:
+//   movzx eax, byte ptr [rip + offset]   ; 0F B6 05 xx xx xx xx
+//   ret                                   ; C3
+// We scan the main module for this 8-byte pattern, follow the
+// RIP-relative offset to find g_allow_mv2_for_testing, then set it.
+// ============================================================
+// ============================================================
+// MV2 patch — set g_allow_mv2_for_testing = true
+//
+// ShouldDisableLegacyExtensions() reads this bool via:
+//   movzx eax, byte ptr [rip+offset]   ; 0F B6 05 xx xx xx xx
+//   test  eax, eax                     ; 85 C0
+// Scan for this pattern, follow the RIP-relative offset to the bool,
+// verify it's in a writable section and currently false, then set to true.
+// ============================================================
+static void PatchMV2() {
+  HMODULE hMod = GetModuleHandleW(nullptr);
+  MODULEINFO mi{};
+  if (!GetModuleInformation(GetCurrentProcess(), hMod, &mi, sizeof(mi)))
+    return;
+
+  auto base  = reinterpret_cast<PBYTE>(hMod);
+  auto limit = base + mi.SizeOfImage - 16;
+
+  for (PBYTE p = base; p < limit; ++p) {
+    if (p[0] == 0x0F && p[1] == 0xB6 && p[2] == 0x05 &&  // movzx eax, byte[rip+?]
+        p[7] == 0x85 && p[8] == 0xC0) {                   // test eax, eax
+      int32_t rel    = *reinterpret_cast<int32_t*>(p + 3);
+      PBYTE   target = p + 7 + rel;
+      if (target < base || target >= base + mi.SizeOfImage) continue;
+      if (*target != 0x00) continue;
+      MEMORY_BASIC_INFORMATION mbi{};
+      if (!VirtualQuery(target, &mbi, sizeof(mbi))) continue;
+      if (!(mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY))) continue;
+      *target = 0x01;
+      return;
+    }
+  }
+}
+
+// ============================================================
 // Entry point hook — mirrors chrome++.cc / portable.cc
 // ============================================================
 using Startup = int (*)();
@@ -249,8 +292,8 @@ static int Loader() {
       wchar_t exe_path[MAX_PATH];
       GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
 
-      std::wstring args     = GetCommand(param);
-      std::wstring cmdline  = QuoteIfNeeded(exe_path);
+      std::wstring args    = GetCommand(param);
+      std::wstring cmdline = QuoteIfNeeded(exe_path);
       if (!args.empty()) { cmdline += L' '; cmdline += args; }
 
       std::vector<wchar_t> buf(cmdline.begin(), cmdline.end());
@@ -266,8 +309,10 @@ static int Loader() {
         CloseHandle(pi.hProcess);
         ExitProcess(0);
       }
+    } else {
+      // Second launch (--portable present): apply runtime patches
+      PatchMV2();
     }
-    // Second launch (--portable present): run normally
   }
   return ExeMain();
 }
@@ -309,9 +354,9 @@ static void LoadSysDll(HINSTANCE hModule) {
   auto ordinals = reinterpret_cast<WORD*>(image_base + exp->AddressOfNameOrdinals);
 
   for (DWORD i = 0; i < exp->NumberOfNames; ++i) {
-    auto fn_name  = reinterpret_cast<char*>(image_base + names[i]);
-    auto real_fn  = reinterpret_cast<PBYTE>(GetProcAddress(real, fn_name));
-    auto stub     = reinterpret_cast<PBYTE>(image_base + funcs[ordinals[i]]);
+    auto fn_name = reinterpret_cast<char*>(image_base + names[i]);
+    auto real_fn = reinterpret_cast<PBYTE>(GetProcAddress(real, fn_name));
+    auto stub    = reinterpret_cast<PBYTE>(image_base + funcs[ordinals[i]]);
     if (!real_fn) continue;
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
