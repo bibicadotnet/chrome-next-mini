@@ -1,0 +1,62 @@
+add_rules("mode.debug", "mode.release")
+
+set_warnings("more")
+
+add_defines("WIN32", "_WIN32", "UNICODE", "_UNICODE")
+set_encodings("source:utf-8")
+add_cxxflags("/std:c++23preview", {force = true})
+set_fpmodels("precise")
+
+if is_mode("release") then
+    set_exceptions("none")
+    set_optimize("smallest")
+    set_runtimes("MT")
+    add_defines("NDEBUG")
+    add_ldflags("/DYNAMICBASE")
+    set_policy("build.optimization.lto", true)
+end
+
+if is_mode("debug") then
+    set_runtimes("MTd")
+    add_defines("_DEBUG")
+    add_ldflags("/DYNAMICBASE")
+end
+
+-- Detours static library
+target("detours")
+    set_kind("static")
+    add_includedirs("detours/src", {public = true})
+    add_files(
+        "detours/src/detours.cpp",
+        "detours/src/disasm.cpp",
+        "detours/src/image.cpp",
+        "detours/src/modules.cpp"
+    )
+    if is_arch("x86") then
+        add_defines("_X86_")
+        add_files("detours/src/disolx86.cpp")
+    elseif is_arch("x64") then
+        add_defines("_AMD64_")
+        add_files("detours/src/disolx64.cpp")
+    elseif is_arch("arm64") then
+        add_defines("_ARM64_")
+        add_files("detours/src/disolarm64.cpp")
+    end
+
+-- Main DLL
+target("edge_portable")
+    set_kind("shared")
+    set_targetdir("$(builddir)/$(mode)")
+    set_basename("version")
+    add_deps("detours")
+    add_files("src/edge_portable.cc")
+    add_links("shlwapi", "crypt32", "psapi")
+    after_build(function(target)
+        if is_mode("release") then
+            for _, file in ipairs(os.files("$(builddir)/release/*")) do
+                if not file:endswith("dll") then
+                    os.rm(file)
+                end
+            end
+        end
+    end)
