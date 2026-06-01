@@ -226,16 +226,44 @@ static bool PatchMV2InModule(HMODULE hModule) {
 }
 
 static void PatchMV2() {
-  // Enumerate all loaded modules — g_allow_mv2_for_testing is in chrome.dll
-  HMODULE modules[1024];
-  DWORD needed = 0;
-  if (!EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed))
-    return;
-  DWORD count = needed / sizeof(HMODULE);
-  for (DWORD i = 0; i < count; ++i) {
-    if (PatchMV2InModule(modules[i]))
-      return;
+  static const wchar_t* kCandidates[] = {
+    L"chrome.dll", L"msedge.dll", nullptr
+  };
+  for (int i = 0; kCandidates[i]; ++i) {
+    HMODULE h = GetModuleHandleW(kCandidates[i]);
+    if (h && PatchMV2InModule(h)) return;
   }
+}
+
+// Hook LoadLibraryExW to catch chrome.dll/msedge.dll the moment they load
+static auto RawLoadLibraryExW = LoadLibraryExW;
+
+static HMODULE WINAPI MyLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile,
+                                        DWORD dwFlags) {
+  HMODULE h = RawLoadLibraryExW(lpLibFileName, hFile, dwFlags);
+  if (h && lpLibFileName) {
+    const wchar_t* name = wcsrchr(lpLibFileName, L'\');
+    name = name ? name + 1 : lpLibFileName;
+    if (_wcsicmp(name, L"chrome.dll") == 0 ||
+        _wcsicmp(name, L"msedge.dll") == 0) {
+      PatchMV2InModule(h);
+      // Unhook ourselves — only need to patch once
+      DetourTransactionBegin();
+      DetourUpdateThread(GetCurrentThread());
+      DetourDetach(reinterpret_cast<LPVOID*>(&RawLoadLibraryExW),
+                   reinterpret_cast<void*>(MyLoadLibraryExW));
+      DetourTransactionCommit();
+    }
+  }
+  return h;
+}
+
+static void InstallLoadLibraryHook() {
+  DetourTransactionBegin();
+  DetourUpdateThread(GetCurrentThread());
+  DetourAttach(reinterpret_cast<LPVOID*>(&RawLoadLibraryExW),
+               reinterpret_cast<void*>(MyLoadLibraryExW));
+  DetourTransactionCommit();
 }
 
 // ============================================================
@@ -340,8 +368,9 @@ static int Loader() {
         ExitProcess(0);
       }
     }
-    // Second launch (--portable present): patch MV2 then run
-    PatchMV2();
+    // Second launch (--portable present): install LoadLibrary hook to patch MV2
+    // when chrome.dll/msedge.dll is loaded (they load after ExeMain returns)
+    InstallLoadLibraryHook();
   }
   return ExeMain();
 }
