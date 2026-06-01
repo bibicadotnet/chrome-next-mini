@@ -51,25 +51,12 @@ target("edge_portable")
     add_deps("detours")
     add_files("src/edge_portable.cc")
     add_links("shlwapi", "crypt32", "psapi", "shell32")
-    after_build(function(target)
-        if is_mode("release") then
-            for _, file in ipairs(os.files("$(builddir)/release/*")) do
-                if not file:endswith("dll") then
-                    os.rm(file)
-                end
-            end
-        end
-    end)
 
 -- setdll tool from Detours
 target("setdll")
     set_kind("binary")
     set_targetdir("$(builddir)/$(mode)")
+    set_basename("setdll-x64")
     add_deps("detours")
-    add_files("detours/src/setdll.cpp")
+    add_files("detours/samples/setdll/setdll.cpp")
     add_links("shlwapi")
-    after_build(function(target)
-        if is_mode("release") then
-            os.cp(target:targetfile(), path.join(target:targetdir(), "setdll-x64.exe"))
-        end
-    end)
