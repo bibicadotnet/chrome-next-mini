@@ -170,6 +170,61 @@ static BOOL WINAPI MyCryptUnprotectData(
 }
 
 // ============================================================
+// MV2 patch: set g_allow_mv2_for_testing = true
+// https://source.chromium.org/chromium/chromium/src/+/main:extensions/browser/manifest_v2_experiment_manager.cc;l=41
+//
+// Locate getter+setter pair that both reference the same bool address:
+//   getter: 0F B6 05 [off32] C3   (movzx eax, byte ptr [rip+X]; ret)
+//   setter: 88 0D [off32]    C3   (mov byte ptr [rip+Y], cl;    ret)
+// Both X and Y must resolve to the same address == g_allow_mv2_for_testing.
+// ============================================================
+static void PatchMV2() {
+  HMODULE chrome = GetModuleHandleW(nullptr);
+  if (!chrome) return;
+
+  MODULEINFO mi{};
+  GetModuleInformation(GetCurrentProcess(), chrome, &mi, sizeof(mi));
+
+  auto base  = reinterpret_cast<PBYTE>(chrome);
+  auto limit = base + mi.SizeOfImage - 8;
+
+  auto resolve_rip = [](PBYTE insn, int offset_pos, int insn_len) -> PBYTE {
+    INT32 off;
+    memcpy(&off, insn + offset_pos, 4);
+    return insn + insn_len + off;
+  };
+
+  for (PBYTE p = base; p < limit; ++p) {
+    // getter: 0F B6 05 [off32] C3
+    if (p[0] != 0x0F || p[1] != 0xB6 || p[2] != 0x05 || p[7] != 0xC3)
+      continue;
+
+    PBYTE bool_addr = resolve_rip(p, 3, 7);
+    if (bool_addr < base || bool_addr >= base + mi.SizeOfImage) continue;
+    if (*bool_addr != 0) continue;
+
+    // Find matching setter: 88 0D [off32] C3 pointing to same address
+    bool found_setter = false;
+    for (PBYTE q = base; q < limit; ++q) {
+      if (q[0] == 0x88 && q[1] == 0x0D && q[6] == 0xC3) {
+        if (resolve_rip(q, 2, 6) == bool_addr) {
+          found_setter = true;
+          break;
+        }
+      }
+    }
+    if (!found_setter) continue;
+
+    DWORD old;
+    if (VirtualProtect(bool_addr, 1, PAGE_READWRITE, &old)) {
+      *bool_addr = 1;
+      VirtualProtect(bool_addr, 1, old, &old);
+    }
+    break;
+  }
+}
+
+// ============================================================
 // Command-line builder — mirrors portable.cc logic
 // ============================================================
 static std::wstring GetCommand(LPWSTR param) {
@@ -267,10 +322,7 @@ static int Loader() {
         ExitProcess(0);
       }
     }
-    } else {
-      // Second launch (--portable present): apply patches then run
-      PatchMV2();
-    }
+    // Second launch (--portable present): run normally
   }
   return ExeMain();
 }
@@ -324,47 +376,6 @@ static void LoadSysDll(HINSTANCE hModule) {
 }
 
 // ============================================================
-// MV2 patch — set g_allow_mv2_for_testing = true at runtime
-//
-// In release builds, IsAllowMV2ForTestingSet() compiles to:
-//   movzx eax, byte ptr [rip + offset]   ; 0F B6 05 xx xx xx xx
-//   ret                                   ; C3
-// We scan the main module for this 8-byte pattern, follow the
-// RIP-relative offset to find g_allow_mv2_for_testing, then set it.
-// ============================================================
-static void PatchMV2() {
-  HMODULE hMod = GetModuleHandleW(nullptr);
-  MODULEINFO mi{};
-  if (!GetModuleInformation(GetCurrentProcess(), hMod, &mi, sizeof(mi)))
-    return;
-
-  auto base  = reinterpret_cast<PBYTE>(hMod);
-  auto limit = base + mi.SizeOfImage - 8;
-
-  for (PBYTE p = base; p < limit; ++p) {
-    // Pattern: movzx eax, byte ptr [rip+??] ; ret
-    if (p[0] == 0x0F && p[1] == 0xB6 && p[2] == 0x05 && p[7] == 0xC3) {
-      // RIP-relative: address = p+7 + *(int32*)(p+3)
-      int32_t rel = *reinterpret_cast<int32_t*>(p + 3);
-      PBYTE target = p + 7 + rel;
-
-      // Sanity: must be within module, currently 0 (false)
-      if (target < base || target >= base + mi.SizeOfImage) continue;
-      if (*target != 0x00) continue;
-
-      // Verify: a nearby byte before this function is also typical
-      // (this bool should be in .data/.bss — writable section)
-      MEMORY_BASIC_INFORMATION mbi{};
-      if (!VirtualQuery(target, &mbi, sizeof(mbi))) continue;
-      if (!(mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY))) continue;
-
-      *target = 0x01;  // true
-      return;
-    }
-  }
-}
-
-// ============================================================
 // DllMain
 // ============================================================
 BOOL WINAPI DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID) {
@@ -384,6 +395,7 @@ BOOL WINAPI DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID) {
     DetourTransactionCommit();
 
     InstallLoader();
+    PatchMV2();
   }
   return TRUE;
 }
