@@ -1,7 +1,7 @@
 
 # Chrome++ Next Mini
 
-Phiên bản tối giải của [Chrome++ Next](https://github.com/Bush2021/chrome_plus)
+Phiên bản tối giản của [Chrome++ Next](https://github.com/Bush2021/chrome_plus)
 
 ```
 [general]
