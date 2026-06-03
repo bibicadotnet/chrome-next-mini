@@ -3,8 +3,14 @@
 #include <psapi.h>
 #include <shlwapi.h>
 #include <shellapi.h>
+#include <propkey.h>
+#include <shobjidl.h>
 #include <intrin.h>
 
+#include <atomic>
+#include <memory>
+#include <ranges>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -195,6 +201,173 @@ static BOOL WINAPI MyCryptUnprotectData(
 }
 
 // ============================================================
+// AppId — unique AppUserModelID per install directory
+// Prevents multiple portable instances from merging in taskbar
+// ============================================================
+static uint64_t Fnv1aHash(std::wstring_view input) {
+  uint64_t hash = 14695981039346656037ULL;
+  auto bytes = std::as_bytes(std::span{input});
+  for (auto b : bytes) {
+    hash ^= static_cast<uint64_t>(b);
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+static const std::wstring& GetCustomAppUserModelID() {
+  static const std::wstring custom_appid = [] {
+    constexpr wchar_t hex[] = L"0123456789ABCDEF";
+    auto hash = Fnv1aHash(GetAppDir());
+    std::wstring result{L"BrowserPortable."};
+    result.reserve(result.size() + 16);
+    for (int i = 60; i >= 0; i -= 4)
+      result += hex[(hash >> i) & 0xF];
+    return result;
+  }();
+  return custom_appid;
+}
+
+static bool IsBrowserWindow(HWND hwnd) {
+  wchar_t cls[256];
+  GetClassNameW(hwnd, cls, 256);
+  return wcscmp(cls, L"Chrome_WidgetWin_1") == 0;
+}
+
+struct PropVariantDeleter {
+  void operator()(PROPVARIANT* pv) const { PropVariantClear(pv); delete pv; }
+};
+using ScopedPropVariant = std::unique_ptr<PROPVARIANT, PropVariantDeleter>;
+
+static ScopedPropVariant MakeAppIdVariant() {
+  auto pv = ScopedPropVariant(new PROPVARIANT{});
+  pv->vt = VT_EMPTY;
+  const auto& id = GetCustomAppUserModelID();
+  const size_t char_count = id.size() + 1;
+  const size_t byte_len = char_count * sizeof(wchar_t);
+  pv->pwszVal = static_cast<LPWSTR>(CoTaskMemAlloc(byte_len));
+  if (pv->pwszVal) {
+    pv->vt = VT_LPWSTR;
+    std::span<wchar_t> dest{pv->pwszVal, char_count};
+    auto result = std::ranges::copy(id, dest.begin());
+    *result.out = L'\0';
+  }
+  return pv;
+}
+
+class PropertyStoreWrapper final : public IPropertyStore {
+ public:
+  explicit PropertyStoreWrapper(IPropertyStore* real) : real_(real) {}
+  ~PropertyStoreWrapper() { if (real_) real_->Release(); }
+  PropertyStoreWrapper(const PropertyStoreWrapper&) = delete;
+  PropertyStoreWrapper& operator=(const PropertyStoreWrapper&) = delete;
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+    if (!ppv) return E_POINTER;
+    if (riid == IID_IUnknown || riid == IID_IPropertyStore) {
+      *ppv = static_cast<IPropertyStore*>(this);
+      AddRef();
+      return S_OK;
+    }
+    return real_->QueryInterface(riid, ppv);
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override {
+    return ref_.fetch_add(1, std::memory_order_relaxed) + 1;
+  }
+  ULONG STDMETHODCALLTYPE Release() override {
+    auto c = ref_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+    if (c == 0) delete this;
+    return c;
+  }
+  HRESULT STDMETHODCALLTYPE GetCount(DWORD* c) override { return real_->GetCount(c); }
+  HRESULT STDMETHODCALLTYPE GetAt(DWORD i, PROPERTYKEY* k) override { return real_->GetAt(i, k); }
+  HRESULT STDMETHODCALLTYPE GetValue(REFPROPERTYKEY key, PROPVARIANT* pv) override {
+    if (IsEqualPropertyKey(key, PKEY_AppUserModel_ID)) {
+      auto v = MakeAppIdVariant();
+      *pv = *v; v->vt = VT_EMPTY;
+      return S_OK;
+    }
+    return real_->GetValue(key, pv);
+  }
+  HRESULT STDMETHODCALLTYPE SetValue(REFPROPERTYKEY key, REFPROPVARIANT propvar) override {
+    if (IsEqualPropertyKey(key, PKEY_AppUserModel_ID)) {
+      auto v = MakeAppIdVariant();
+      return real_->SetValue(key, *v);
+    }
+    return real_->SetValue(key, propvar);
+  }
+  HRESULT STDMETHODCALLTYPE Commit() override { return real_->Commit(); }
+
+ private:
+  IPropertyStore* real_;
+  std::atomic<ULONG> ref_{1};
+};
+
+static auto RawSetCurrentProcessExplicitAppUserModelID =
+    SetCurrentProcessExplicitAppUserModelID;
+
+static HRESULT WINAPI MySetCurrentProcessExplicitAppUserModelID(PCWSTR) {
+  return RawSetCurrentProcessExplicitAppUserModelID(
+      GetCustomAppUserModelID().c_str());
+}
+
+static auto RawSHGetPropertyStoreForWindow = SHGetPropertyStoreForWindow;
+
+static HRESULT WINAPI MySHGetPropertyStoreForWindow(HWND hwnd, REFIID riid,
+                                                     void** ppv) {
+  HRESULT hr = RawSHGetPropertyStoreForWindow(hwnd, riid, ppv);
+  if (SUCCEEDED(hr) && ppv && *ppv && riid == IID_IPropertyStore) {
+    if (IsBrowserWindow(hwnd)) {
+      auto* wrapper = new (std::nothrow)
+          PropertyStoreWrapper(static_cast<IPropertyStore*>(*ppv));
+      if (wrapper) *ppv = static_cast<IPropertyStore*>(wrapper);
+    }
+  }
+  return hr;
+}
+
+static void SetAppId() {
+  DetourTransactionBegin();
+  DetourUpdateThread(GetCurrentThread());
+  DetourAttach(
+      reinterpret_cast<LPVOID*>(&RawSetCurrentProcessExplicitAppUserModelID),
+      reinterpret_cast<void*>(MySetCurrentProcessExplicitAppUserModelID));
+  DetourAttach(reinterpret_cast<LPVOID*>(&RawSHGetPropertyStoreForWindow),
+               reinterpret_cast<void*>(MySHGetPropertyStoreForWindow));
+  DetourTransactionCommit();
+}
+
+// ============================================================
+// Policies — ignore enterprise registry policies
+// ============================================================
+static auto RawRegOpenKeyExW = RegOpenKeyExW;
+
+static bool IsPolicyKey(LPCWSTR lpSubKey) {
+  if (!lpSubKey) return false;
+  return StrStrIW(lpSubKey, L"Policies\\Google\\Chrome") ||
+         StrStrIW(lpSubKey, L"Policies\\Microsoft\\Edge") ||
+         StrStrIW(lpSubKey, L"Policies\\Chromium") ||
+         StrStrIW(lpSubKey, L"Policies\\BraveSoftware\\Brave");
+}
+
+static LSTATUS APIENTRY MyRegOpenKeyExW(HKEY hKey, LPCWSTR lpSubKey,
+                                         DWORD ulOptions, REGSAM samDesired,
+                                         PHKEY phkResult) {
+  if ((hKey == HKEY_LOCAL_MACHINE || hKey == HKEY_CURRENT_USER) &&
+      IsPolicyKey(lpSubKey))
+    return ERROR_FILE_NOT_FOUND;
+  return RawRegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired, phkResult);
+}
+
+static void IgnorePolicies() {
+  if (GetIniString(L"general", L"ignore_policies") != L"1") return;
+  DetourTransactionBegin();
+  DetourUpdateThread(GetCurrentThread());
+  DetourAttach(reinterpret_cast<LPVOID*>(&RawRegOpenKeyExW),
+               reinterpret_cast<void*>(MyRegOpenKeyExW));
+  DetourTransactionCommit();
+}
+
+// ============================================================
 // Command-line builder — mirrors portable.cc logic
 // ============================================================
 static std::wstring GetCommand(LPWSTR param) {
@@ -293,6 +466,8 @@ static int Loader() {
       }
     }
     // Second launch (--portable present): run normally
+    SetAppId();
+    IgnorePolicies();
   }
   return ExeMain();
 }
