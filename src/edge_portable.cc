@@ -116,6 +116,31 @@ static std::wstring QuoteIfNeeded(const std::wstring& s) {
 }
 
 // ============================================================
+// FakeGetComputerName / FakeGetVolumeInformation
+// Prevent profile from binding to a specific machine or drive
+// https://source.chromium.org/chromium/chromium/src/+/main:rlz/win/lib/machine_id_win.cc;l=41
+// ============================================================
+static auto RawGetVolumeInformationW = GetVolumeInformationW;
+static auto RawGetComputerNameW      = GetComputerNameW;
+
+static BOOL WINAPI FakeGetComputerName(LPTSTR, LPDWORD) {
+  return FALSE;
+}
+
+static BOOL WINAPI FakeGetVolumeInformation(
+    LPCTSTR lpRootPathName, LPTSTR lpVolumeNameBuffer, DWORD nVolumeNameSize,
+    LPDWORD lpVolumeSerialNumber, LPDWORD lpMaximumComponentLength,
+    LPDWORD lpFileSystemFlags, LPTSTR lpFileSystemNameBuffer,
+    DWORD nFileSystemNameSize) {
+  if (lpVolumeSerialNumber != nullptr)
+    return FALSE;
+  return RawGetVolumeInformationW(
+      lpRootPathName, lpVolumeNameBuffer, nVolumeNameSize,
+      lpVolumeSerialNumber, lpMaximumComponentLength, lpFileSystemFlags,
+      lpFileSystemNameBuffer, nFileSystemNameSize);
+}
+
+// ============================================================
 // UpdateProcThreadAttribute hook
 // Strips BlockNonMicrosoftBinaries so unsigned DLLs load in child processes
 // ============================================================
@@ -331,6 +356,10 @@ BOOL WINAPI DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID) {
 
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
+    DetourAttach(reinterpret_cast<LPVOID*>(&RawGetComputerNameW),
+                 reinterpret_cast<void*>(FakeGetComputerName));
+    DetourAttach(reinterpret_cast<LPVOID*>(&RawGetVolumeInformationW),
+                 reinterpret_cast<void*>(FakeGetVolumeInformation));
     DetourAttach(reinterpret_cast<LPVOID*>(&RawUpdateProcThreadAttribute),
                  reinterpret_cast<void*>(MyUpdateProcThreadAttribute));
     DetourAttach(reinterpret_cast<LPVOID*>(&RawCryptProtectData),
