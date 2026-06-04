@@ -1,5 +1,5 @@
 
-# Chrome++ Next Mini
+# Chrome++ Next Mini (thử nghiệm)
 
 Phiên bản tối giản của [Chrome++ Next](https://github.com/Bush2021/chrome_plus)
 
@@ -13,9 +13,7 @@ ignore_policies=0
 win32k=0
 ```
 
-Beta test, không chắc Edge khi chạy 1 thời gian có bị lỗi như bản Chrome++ Next gốc không
-
-Nghi ngờ khả năng chạy mặc định `App-Bound Encryption` có thể tạo ra tình huống crash ngẫu nhiên, đợt thử nghiệm này tắt đi xem thế nào
+Beta test, không chắc Edge khi chạy 1 thời gian có bị lỗi như bản Chrome++ Next gốc không, nghi ngờ khả năng chạy mặc định `App-Bound Encryption` có thể tạo ra tình huống crash ngẫu nhiên, đợt thử nghiệm này tắt đi xem thế nào
 
 ```
 Windows Registry Editor Version 5.00
