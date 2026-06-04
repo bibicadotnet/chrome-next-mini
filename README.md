@@ -9,6 +9,8 @@ Phiên bản tối giản của [Chrome++ Next](https://github.com/Bush2021/chro
 data_dir=%app%\..\Data
 cache_dir=%app%\..\Cache
 command_line=--no-first-run --no-default-browser-check --disable-features=ExtensionManifestV2Unsupported,ExtensionManifestV2Disabled,OmniboxContextualSearchOnFocusSuggestions,OmniboxContextualSuggestions
+ignore_policies=0
+win32k=0
 ```
 
 Beta test, không chắc Edge khi chạy 1 thời gian có bị lỗi như bản Chrome++ Next gốc không
