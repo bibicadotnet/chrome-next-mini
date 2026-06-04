@@ -164,6 +164,8 @@ static BOOL WINAPI MyUpdateProcThreadAttribute(
       cbSize >= sizeof(DWORD64)) {
     PDWORD64 policy = static_cast<PDWORD64>(lpValue);
     policy[0] &= ~kBlockNonMicrosoftBinariesAlwaysOn;
+    if (GetPrivateProfileIntW(L"general", L"win32k", 0, GetIniPath().c_str()))
+      policy[0] &= ~kWin32kSystemCallDisableAlwaysOn;
   }
   return RawUpdateProcThreadAttribute(lpAttributeList, dwFlags, Attribute,
                                       lpValue, cbSize, lpPreviousValue,
@@ -394,8 +396,9 @@ static std::wstring GetCommand(LPWSTR param) {
 
   args.emplace_back(L"--portable");
 
-  // Merge all --disable-features into one
-  std::wstring combined_features;
+  // Merge --disable-features and --enable-features each into one
+  std::wstring combined_disable;
+  std::wstring combined_enable;
   std::vector<std::wstring> final_args;
   final_args.reserve(args.size() + 4);
   bool has_user_data  = false;
@@ -403,8 +406,11 @@ static std::wstring GetCommand(LPWSTR param) {
 
   for (auto& arg : args) {
     if (arg.starts_with(L"--disable-features=")) {
-      if (!combined_features.empty()) combined_features += L',';
-      combined_features += arg.substr(wcslen(L"--disable-features="));
+      if (!combined_disable.empty()) combined_disable += L',';
+      combined_disable += arg.substr(wcslen(L"--disable-features="));
+    } else if (arg.starts_with(L"--enable-features=")) {
+      if (!combined_enable.empty()) combined_enable += L',';
+      combined_enable += arg.substr(wcslen(L"--enable-features="));
     } else {
       if (arg.starts_with(L"--user-data-dir="))  has_user_data  = true;
       if (arg.starts_with(L"--disk-cache-dir=")) has_disk_cache = true;
@@ -412,9 +418,12 @@ static std::wstring GetCommand(LPWSTR param) {
     }
   }
 
-  if (!combined_features.empty()) combined_features += L',';
-  combined_features += L"WinSboxNoFakeGdiInit,WebUIInProcessResourceLoading";
-  final_args.emplace_back(L"--disable-features=" + combined_features);
+  if (!combined_disable.empty()) combined_disable += L',';
+  combined_disable += L"WinSboxNoFakeGdiInit,WebUIInProcessResourceLoading";
+  final_args.emplace_back(L"--disable-features=" + combined_disable);
+
+  if (!combined_enable.empty())
+    final_args.emplace_back(L"--enable-features=" + combined_enable);
 
   if (!has_user_data) {
     std::wstring d = GetIniString(L"general", L"data_dir");
