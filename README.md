@@ -1,7 +1,7 @@
 
 # Chrome++ Next Mini (thử nghiệm)
 
-Phiên bản tối giản của [Chrome++ Next](https://github.com/Bush2021/chrome_plus)
+Phiên bản tối giản của [Chrome++ Next](https://github.com/Bush2021/chrome_plus), không hẳn là bản fork, cũng không hẳn là viết mới, vì dùng lại logic có sẵn từ Chrome++ Next
 
 - Cấu hình `chrome++.ini` đơn giản nhất có thể
 ```
