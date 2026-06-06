@@ -232,7 +232,7 @@ static const std::wstring& GetCustomAppUserModelID() {
 static bool IsBrowserWindow(HWND hwnd) {
   wchar_t cls[256];
   GetClassNameW(hwnd, cls, 256);
-  return wcscmp(cls, L"Chrome_WidgetWin_1") == 0;
+  return wcsncmp(cls, L"Chrome_WidgetWin_", 17) == 0;
 }
 
 struct PropVariantDeleter {
