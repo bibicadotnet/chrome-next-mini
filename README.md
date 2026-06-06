@@ -7,7 +7,9 @@ Phiên bản tối giản của [Chrome++ Next](https://github.com/Bush2021/chro
 Download edge_portable-*.zip tại release, giải nén
 
 - Trên các trình duyệt như Chromium/Chrome/Cốc Cốc ... chép 2 file `chrome++.ini` và `version.dll` trong cùng thư mục với `chrome.exe`
-- Trên Edge, chép 3 file `chrome++.ini`, `setdll-x64.exe`, `version.dll` trong cùng thư mục với `msedge.exe`, sau đó gọi PowerShell, chạy lệnh `./setdll-x64.exe /d:version.dll msedge.exe` 
+- Trên Edge, chép 3 file `chrome++.ini`, `setdll-x64.exe`, `version.dll` trong cùng thư mục với `msedge.exe`, sau đó gọi PowerShell, chạy lệnh `./setdll-x64.exe /d:version.dll msedge.exe`
+
+ Do phương pháp vượt rào được sử dụng để chạy ở chế độ di động, Microsoft Defender Antivirus đôi khi có thể nhận diện nhầm nó là một phần mềm "tiềm ẩn" độc hại trojan (tạm chưa thấy bản Chrome++ Next Mini báo nhầm)
 
 ### Cấu hình 
 Giữ các tính năng thiết yếu tạo portable, tất cả tính năng nâng cao khác của bản gốc bỏ hết (vì không biết tính năng nào tạo ra lỗi ở Edge)
