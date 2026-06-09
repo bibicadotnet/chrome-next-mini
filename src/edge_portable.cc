@@ -514,7 +514,7 @@ static std::wstring GetCommand(LPWSTR param) {
   }
 
   if (!combined_disable.empty()) combined_disable += L',';
-  combined_disable += L"WinSboxNoFakeGdiInit,WebUIInProcessResourceLoading";
+  combined_disable += L"OutdatedBuildDetector,WinSboxNoFakeGdiInit,WebUIInProcessResourceLoading";
   final_args.emplace_back(L"--disable-features=" + combined_disable);
 
   if (!combined_enable.empty())
