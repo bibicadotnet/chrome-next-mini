@@ -8,6 +8,7 @@
 #include <intrin.h>
 
 #include <atomic>
+#include <cstring>
 #include <memory>
 #include <ranges>
 #include <span>
@@ -351,6 +352,44 @@ static bool IsPolicyKey(LPCWSTR lpSubKey) {
          StrStrIW(lpSubKey, L"Policies\\BraveSoftware\\Brave");
 }
 
+// ============================================================
+// SuppressFalseUpgradeNotification helpers
+// ============================================================
+// Read the running Chrome version from chrome.dll's embedded VS_FIXEDFILEINFO.
+// Used to spoof the "pv" registry value so Chrome's InstalledVersionPoller
+// sees installed == running and clears the false "out of date" prompt.
+static std::wstring ComputeRunningChromeVersion() {
+  HMODULE chrome_dll = GetModuleHandleW(L"chrome.dll");
+  if (!chrome_dll) return {};
+  HRSRC resource = FindResourceW(chrome_dll, MAKEINTRESOURCEW(VS_VERSION_INFO),
+                                 RT_VERSION);
+  if (!resource) return {};
+  const DWORD resource_size = SizeofResource(chrome_dll, resource);
+  HGLOBAL loaded = LoadResource(chrome_dll, resource);
+  const auto* data =
+      loaded ? static_cast<const BYTE*>(LockResource(loaded)) : nullptr;
+  if (!data || resource_size < sizeof(VS_FIXEDFILEINFO)) return {};
+  for (DWORD offset = 0;
+       offset + sizeof(VS_FIXEDFILEINFO) <= resource_size;
+       offset += sizeof(DWORD)) {
+    const auto* info =
+        reinterpret_cast<const VS_FIXEDFILEINFO*>(data + offset);
+    if (info->dwSignature != 0xFEEF04BD) continue;
+    if (info->dwFileVersionMS == 0 && info->dwFileVersionLS == 0) return {};
+    return std::to_wstring(HIWORD(info->dwFileVersionMS)) + L'.' +
+           std::to_wstring(LOWORD(info->dwFileVersionMS)) + L'.' +
+           std::to_wstring(HIWORD(info->dwFileVersionLS)) + L'.' +
+           std::to_wstring(LOWORD(info->dwFileVersionLS));
+  }
+  return {};
+}
+
+static std::wstring RunningChromeVersion() {
+  static std::wstring cached;
+  if (cached.empty()) cached = ComputeRunningChromeVersion();
+  return cached;
+}
+
 static LSTATUS APIENTRY MyRegOpenKeyExW(HKEY hKey, LPCWSTR lpSubKey,
                                          DWORD ulOptions, REGSAM samDesired,
                                          PHKEY phkResult) {
@@ -360,12 +399,68 @@ static LSTATUS APIENTRY MyRegOpenKeyExW(HKEY hKey, LPCWSTR lpSubKey,
   return RawRegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired, phkResult);
 }
 
+static auto RawRegQueryValueExW = RegQueryValueExW;
+
+// Intercept "pv" reads and return the running Chrome version so that
+// InstalledVersionPoller computes installed == running → no false prompt.
+static LSTATUS APIENTRY MyRegQueryValueExW(HKEY hKey, LPCWSTR lpValueName,
+                                            LPDWORD lpReserved, LPDWORD lpType,
+                                            LPBYTE lpData, LPDWORD lpcbData) {
+  if (lpValueName && lstrcmpiW(lpValueName, L"pv") == 0) {
+    const std::wstring version = RunningChromeVersion();
+    if (!version.empty()) {
+      const DWORD size =
+          static_cast<DWORD>((version.size() + 1) * sizeof(wchar_t));
+      if (lpType) *lpType = REG_SZ;
+      if (!lpData) {
+        if (lpcbData) *lpcbData = size;
+        return ERROR_SUCCESS;
+      }
+      if (lpcbData) {
+        if (*lpcbData < size) { *lpcbData = size; return ERROR_MORE_DATA; }
+        std::memcpy(lpData, version.c_str(), size);
+        *lpcbData = size;
+        return ERROR_SUCCESS;
+      }
+    }
+  }
+  return RawRegQueryValueExW(hKey, lpValueName, lpReserved, lpType, lpData,
+                              lpcbData);
+}
+
+// Separate raw pointer so this hook is fully independent of IgnorePolicies.
+static auto RawRegOpenKeyExW_Upgrade = RegOpenKeyExW;
+
+static LSTATUS APIENTRY MyRegOpenKeyExW_Upgrade(HKEY hKey, LPCWSTR lpSubKey,
+                                                 DWORD ulOptions,
+                                                 REGSAM samDesired,
+                                                 PHKEY phkResult) {
+  const LSTATUS result =
+      RawRegOpenKeyExW_Upgrade(hKey, lpSubKey, ulOptions, samDesired, phkResult);
+  if (result != ERROR_SUCCESS && phkResult && lpSubKey &&
+      StrStrIW(lpSubKey, L"Google\\Update\\Clients\\")) {
+    RawRegOpenKeyExW_Upgrade(hKey, L"", 0, samDesired, phkResult);
+    return ERROR_SUCCESS;
+  }
+  return result;
+}
+
 static void IgnorePolicies() {
   if (GetIniString(L"general", L"ignore_policies") != L"1") return;
   DetourTransactionBegin();
   DetourUpdateThread(GetCurrentThread());
   DetourAttach(reinterpret_cast<LPVOID*>(&RawRegOpenKeyExW),
                reinterpret_cast<void*>(MyRegOpenKeyExW));
+  DetourTransactionCommit();
+}
+
+static void SuppressFalseUpgradeNotification() {
+  DetourTransactionBegin();
+  DetourUpdateThread(GetCurrentThread());
+  DetourAttach(reinterpret_cast<LPVOID*>(&RawRegOpenKeyExW_Upgrade),
+               reinterpret_cast<void*>(MyRegOpenKeyExW_Upgrade));
+  DetourAttach(reinterpret_cast<LPVOID*>(&RawRegQueryValueExW),
+               reinterpret_cast<void*>(MyRegQueryValueExW));
   DetourTransactionCommit();
 }
 
@@ -477,6 +572,7 @@ static int Loader() {
     // Second launch (--portable present): run normally
     SetAppId();
     IgnorePolicies();
+    SuppressFalseUpgradeNotification();
   }
   return ExeMain();
 }
