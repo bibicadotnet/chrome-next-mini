@@ -50,7 +50,7 @@ target("edge_portable")
     set_basename("version")
     add_deps("detours")
     add_files("src/edge_portable.cc")
-    add_links("shlwapi", "crypt32", "psapi", "shell32", "propsys", "ole32", "oleaut32", "advapi32", "user32")
+    add_links("shlwapi", "crypt32", "psapi", "shell32", "propsys", "ole32", "advapi32", "user32")
 
 -- setdll tool from Detours
 target("setdll")
