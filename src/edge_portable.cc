@@ -764,8 +764,8 @@ static DWORD WINAPI ScrollTopThread(LPVOID) {
 }
 
 static void InstallTabScrollTop() {
-  // Default on (=1); set click_tab_scroll_top=0 in [tabs] to disable.
-  if (!GetPrivateProfileIntW(L"tabs", L"click_tab_scroll_top", 1,
+  // Default off (=0); set click_tab_scroll_top=1 in [tabs] to enable.
+  if (!GetPrivateProfileIntW(L"tabs", L"click_tab_scroll_top", 0,
                               GetIniPath().c_str()))
     return;
   HANDLE t = CreateThread(nullptr, 0, ScrollTopThread, nullptr, 0, nullptr);
