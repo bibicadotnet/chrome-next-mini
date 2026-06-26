@@ -632,62 +632,117 @@ static void LoadSysDll(HINSTANCE hModule) {
 // Tab Click → Scroll To Top  (Safari-like behavior)
 // Left-click on the currently active tab → Ctrl+Home
 // Enable/disable: click_tab_scroll_top=1 in [tabs] of chrome++.ini
+//
+// Hook: WH_MOUSE + GetCurrentThreadId() — mirrors chrome_plus
+// inputhook.cc. Runs inline on Chrome's UI thread; no separate
+// thread, no 300 ms OS timeout, no global system hook.
+//
+// Tab detection: ElementFromHandle(root) → FindAll(class="Tab") →
+// PtInRect — mirrors chrome_plus FindTabHitResult in uia.cc.
+// ElementFromHandle sidesteps Chrome_RenderWidgetHostHWND shadowing
+// that makes ElementFromPoint return a renderer node instead of Tab.
+// FindAll(class="Tab") excludes group chips (different class name),
+// fixing false positives on tab group icon clicks.
 // ============================================================
 
+static HINSTANCE      g_hModule    = nullptr;  // set in DllMain
 static HHOOK          g_scroll_hook = nullptr;
 static IUIAutomation* g_uia         = nullptr;
 
-// Quick pre-filter: is the point in the top strip of a Chrome window?
-// Avoids expensive UIA calls for clicks on page content.
-static bool IsInTabBarArea(POINT pt) {
-  HWND hwnd = GetForegroundWindow();
-  if (!hwnd || !IsBrowserWindow(hwnd)) return false;
-  RECT wr;
-  if (!GetWindowRect(hwnd, &wr)) return false;
-  // Tab strip is roughly within the top 55 logical pixels of the window frame.
-  // 55px covers 100 % – 200 % DPI without false-positives on the page body.
-  return (pt.y >= wr.top && pt.y <= wr.top + 55);
+// Lazy-init IUIAutomation on Chrome's UI thread (COM already
+// initialized by Chrome at hook-callback time).
+static IUIAutomation* GetUia() {
+  if (g_uia) return g_uia;
+  CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                   IID_IUIAutomation, reinterpret_cast<void**>(&g_uia));
+  return g_uia;
 }
 
-// Walk up the UIA tree from `pt` to find a TabItem; return true if selected.
+// Locate TabContainerImpl anchored to the root window element.
+// Safe from renderer subtree: TabContainerImpl is a Chrome
+// browser-chrome class that never appears in web content trees.
+static IUIAutomationElement* FindTabContainer(
+    IUIAutomationElement* root) {
+  VARIANT v;
+  VariantInit(&v);
+  v.vt      = VT_BSTR;
+  v.bstrVal = SysAllocString(L"TabContainerImpl");
+
+  IUIAutomationCondition* cond = nullptr;
+  HRESULT hr = g_uia->CreatePropertyCondition(
+      UIA_ClassNamePropertyId, v, &cond);
+  VariantClear(&v);
+  if (FAILED(hr) || !cond) return nullptr;
+
+  IUIAutomationElement* container = nullptr;
+  root->FindFirst(TreeScope_Subtree, cond, &container);
+  cond->Release();
+  return container;  // caller must Release()
+}
+
+// Returns true if pt is on the currently active (selected) tab.
+// Mirrors chrome_plus FindTabHitResult (uia.cc).
 static bool IsOnActiveTab(POINT pt) {
-  if (!g_uia) return false;
+  IUIAutomation* uia = GetUia();
+  if (!uia) return false;
 
-  IUIAutomationElement* elem = nullptr;
-  if (FAILED(g_uia->ElementFromPoint(pt, &elem)) || !elem) return false;
+  const HWND hwnd = WindowFromPoint(pt);
+  const HWND root = hwnd ? GetAncestor(hwnd, GA_ROOT) : nullptr;
+  if (!root || !IsBrowserWindow(root)) return false;
 
-  IUIAutomationTreeWalker* walker = nullptr;
-  g_uia->get_ControlViewWalker(&walker);
+  // ElementFromHandle bypasses Chrome_RenderWidgetHostHWND shadowing.
+  IUIAutomationElement* root_elem = nullptr;
+  if (FAILED(uia->ElementFromHandle(root, &root_elem)) || !root_elem)
+    return false;
 
-  IUIAutomationElement* cur = elem;  // ref already held by ElementFromPoint
-  bool found = false;
+  IUIAutomationElement* container = FindTabContainer(root_elem);
+  root_elem->Release();
+  if (!container) return false;
 
-  for (int depth = 0; depth < 8 && cur && !found; ++depth) {
-    CONTROLTYPEID type = 0;
-    cur->get_CurrentControlType(&type);
+  // class="Tab": individual tabs only — group chips have a different
+  // class name and are automatically excluded.
+  VARIANT v;
+  VariantInit(&v);
+  v.vt      = VT_BSTR;
+  v.bstrVal = SysAllocString(L"Tab");
+  IUIAutomationCondition* tab_cond = nullptr;
+  HRESULT hr = uia->CreatePropertyCondition(
+      UIA_ClassNamePropertyId, v, &tab_cond);
+  VariantClear(&v);
+  if (FAILED(hr) || !tab_cond) { container->Release(); return false; }
 
-    if (type == UIA_TabItemControlTypeId) {
-      VARIANT v;
-      VariantInit(&v);
-      if (SUCCEEDED(cur->GetCurrentPropertyValue(
-              UIA_SelectionItemIsSelectedPropertyId, &v))) {
-        found = (v.vt == VT_BOOL && v.boolVal == VARIANT_TRUE);
-        VariantClear(&v);
+  // TreeScope_Children: horizontal tabs are direct children of
+  // TabContainerImpl (mirrors GetTabElementScope(kHorizontal)).
+  IUIAutomationElementArray* tabs = nullptr;
+  container->FindAll(TreeScope_Children, tab_cond, &tabs);
+  tab_cond->Release();
+  container->Release();
+  if (!tabs) return false;
+
+  int count = 0;
+  tabs->get_Length(&count);
+
+  bool result = false;
+  for (int i = 0; i < count && !result; ++i) {
+    IUIAutomationElement* tab = nullptr;
+    if (FAILED(tabs->GetElement(i, &tab)) || !tab) continue;
+
+    RECT rect = {};
+    if (SUCCEEDED(tab->get_CurrentBoundingRectangle(&rect)) &&
+        PtInRect(&rect, pt)) {
+      VARIANT sel;
+      VariantInit(&sel);
+      if (SUCCEEDED(tab->GetCurrentPropertyValue(
+              UIA_SelectionItemIsSelectedPropertyId, &sel))) {
+        result = (sel.vt == VT_BOOL && sel.boolVal == VARIANT_TRUE);
+        VariantClear(&sel);
       }
-      cur->Release();
-      cur = nullptr;
-      break;
     }
-
-    IUIAutomationElement* parent = nullptr;
-    HRESULT hr = walker ? walker->GetParentElement(cur, &parent) : E_FAIL;
-    cur->Release();
-    cur = (SUCCEEDED(hr) && parent) ? parent : nullptr;
+    tab->Release();
   }
 
-  if (cur)    cur->Release();
-  if (walker) walker->Release();
-  return found;
+  tabs->Release();
+  return result;
 }
 
 static void SendScrollToTop() {
@@ -709,58 +764,39 @@ static void SendScrollToTop() {
   SendInput(4, in, sizeof(INPUT));
 }
 
+// WH_MOUSE runs inline on Chrome's UI thread — uses MOUSEHOOKSTRUCT
+// (not MSLLHOOKSTRUCT which is for WH_MOUSE_LL).
 static LRESULT CALLBACK ScrollTopMouseProc(int nCode, WPARAM wParam,
                                             LPARAM lParam) {
   if (nCode == HC_ACTION) {
-    auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
+    auto* ms = reinterpret_cast<MOUSEHOOKSTRUCT*>(lParam);
 
-    // Must check at LBUTTONDOWN — by LBUTTONUP Chrome has already switched
+    // Check at LBUTTONDOWN: by LBUTTONUP Chrome has already switched
     // tabs, making the newly-active tab appear selected (false positive).
-    static bool s_down_on_active_tab = false;
+    static bool  s_down_on_active_tab = false;
+    static POINT s_down_pt            = {};
 
     if (wParam == WM_LBUTTONDOWN) {
-      s_down_on_active_tab = IsInTabBarArea(ms->pt) && IsOnActiveTab(ms->pt);
+      s_down_pt            = ms->pt;
+      s_down_on_active_tab = IsOnActiveTab(ms->pt);
     } else if (wParam == WM_LBUTTONUP) {
-      if (s_down_on_active_tab && IsInTabBarArea(ms->pt))
-        SendScrollToTop();
+      if (s_down_on_active_tab) {
+        // Fire only if mouse didn't drag (≤4 px from down point).
+        const LONG dx = ms->pt.x - s_down_pt.x;
+        const LONG dy = ms->pt.y - s_down_pt.y;
+        if (dx * dx + dy * dy <= 16)
+          SendScrollToTop();
+      }
       s_down_on_active_tab = false;
     } else if (wParam == WM_MOUSEMOVE && s_down_on_active_tab) {
-      // Cancel if the mouse dragged away (tab drag operation)
-      if (!IsInTabBarArea(ms->pt))
+      // Cancel on drag.
+      const LONG dx = ms->pt.x - s_down_pt.x;
+      const LONG dy = ms->pt.y - s_down_pt.y;
+      if (dx * dx + dy * dy > 16)
         s_down_on_active_tab = false;
     }
   }
   return CallNextHookEx(g_scroll_hook, nCode, wParam, lParam);
-}
-
-// Dedicated thread: owns COM + UIA instance + WH_MOUSE_LL + message pump.
-static DWORD WINAPI ScrollTopThread(LPVOID) {
-  // STA required by WH_MOUSE_LL (hook callback must pump messages on this
-  // thread), and UIAutomation works fine in STA.
-  if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)))
-    return 1;
-
-  if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr,
-                                  CLSCTX_INPROC_SERVER,
-                                  IID_IUIAutomation,
-                                  reinterpret_cast<void**>(&g_uia)))) {
-    g_scroll_hook = SetWindowsHookExW(WH_MOUSE_LL, ScrollTopMouseProc,
-                                       nullptr, 0);
-    // Message pump — required for WH_MOUSE_LL callbacks to fire.
-    MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0))
-      DispatchMessageW(&msg);
-
-    if (g_scroll_hook) {
-      UnhookWindowsHookEx(g_scroll_hook);
-      g_scroll_hook = nullptr;
-    }
-    g_uia->Release();
-    g_uia = nullptr;
-  }
-
-  CoUninitialize();
-  return 0;
 }
 
 static void InstallTabScrollTop() {
@@ -768,8 +804,10 @@ static void InstallTabScrollTop() {
   if (!GetPrivateProfileIntW(L"tabs", L"click_tab_scroll_top", 0,
                               GetIniPath().c_str()))
     return;
-  HANDLE t = CreateThread(nullptr, 0, ScrollTopThread, nullptr, 0, nullptr);
-  if (t) CloseHandle(t);
+  // WH_MOUSE on Chrome's UI thread — no dedicated thread needed.
+  // hModule required so Windows can locate the hook proc in this DLL.
+  g_scroll_hook = SetWindowsHookExW(WH_MOUSE, ScrollTopMouseProc,
+                                     g_hModule, GetCurrentThreadId());
 }
 
 // ============================================================
@@ -777,6 +815,7 @@ static void InstallTabScrollTop() {
 // ============================================================
 BOOL WINAPI DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID) {
   if (dwReason == DLL_PROCESS_ATTACH) {
+    g_hModule = hModule;
     DisableThreadLibraryCalls(hModule);
 
     LoadSysDll(hModule);
