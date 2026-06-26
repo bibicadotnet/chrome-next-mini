@@ -5,6 +5,7 @@
 #include <shellapi.h>
 #include <propkey.h>
 #include <shobjidl.h>
+#include <uiautomation.h>
 #include <intrin.h>
 
 #include <atomic>
@@ -573,6 +574,7 @@ static int Loader() {
     SetAppId();
     IgnorePolicies();
     SuppressFalseUpgradeNotification();
+    InstallTabScrollTop();
   }
   return ExeMain();
 }
@@ -623,6 +625,137 @@ static void LoadSysDll(HINSTANCE hModule) {
     DetourAttach(reinterpret_cast<LPVOID*>(&stub), real_fn);
     DetourTransactionCommit();
   }
+}
+
+// ============================================================
+// Tab Click → Scroll To Top  (Safari-like behavior)
+// Left-click on the currently active tab → Ctrl+Home
+// Enable/disable: click_tab_scroll_top=1 in [tabs] of chrome++.ini
+// ============================================================
+
+static HHOOK          g_scroll_hook = nullptr;
+static IUIAutomation* g_uia         = nullptr;
+
+// Quick pre-filter: is the point in the top strip of a Chrome window?
+// Avoids expensive UIA calls for clicks on page content.
+static bool IsInTabBarArea(POINT pt) {
+  HWND hwnd = GetForegroundWindow();
+  if (!hwnd || !IsBrowserWindow(hwnd)) return false;
+  RECT wr;
+  if (!GetWindowRect(hwnd, &wr)) return false;
+  // Tab strip is roughly within the top 55 logical pixels of the window frame.
+  // 55px covers 100 % – 200 % DPI without false-positives on the page body.
+  return (pt.y >= wr.top && pt.y <= wr.top + 55);
+}
+
+// Walk up the UIA tree from `pt` to find a TabItem; return true if selected.
+static bool IsOnActiveTab(POINT pt) {
+  if (!g_uia) return false;
+
+  IUIAutomationElement* elem = nullptr;
+  if (FAILED(g_uia->ElementFromPoint(pt, &elem)) || !elem) return false;
+
+  IUIAutomationTreeWalker* walker = nullptr;
+  g_uia->get_ControlViewWalker(&walker);
+
+  IUIAutomationElement* cur = elem;  // ref already held by ElementFromPoint
+  bool found = false;
+
+  for (int depth = 0; depth < 8 && cur && !found; ++depth) {
+    CONTROLTYPEID type = 0;
+    cur->get_CurrentControlType(&type);
+
+    if (type == UIA_TabItemControlTypeId) {
+      VARIANT v;
+      VariantInit(&v);
+      if (SUCCEEDED(cur->GetCurrentPropertyValue(
+              UIA_SelectionItemIsSelectedPropertyId, &v))) {
+        found = (v.vt == VT_BOOL && v.boolVal == VARIANT_TRUE);
+        VariantClear(&v);
+      }
+      cur->Release();
+      cur = nullptr;
+      break;
+    }
+
+    IUIAutomationElement* parent = nullptr;
+    HRESULT hr = walker ? walker->GetParentElement(cur, &parent) : E_FAIL;
+    cur->Release();
+    cur = (SUCCEEDED(hr) && parent) ? parent : nullptr;
+  }
+
+  if (cur)    cur->Release();
+  if (walker) walker->Release();
+  return found;
+}
+
+static void SendScrollToTop() {
+  INPUT in[4] = {};
+  // Press Ctrl
+  in[0].type = INPUT_KEYBOARD;
+  in[0].ki.wVk = VK_CONTROL;
+  in[0].ki.dwFlags = KEYEVENTF_EXTENDEDKEY;
+  // Press Home
+  in[1].type = INPUT_KEYBOARD;
+  in[1].ki.wVk = VK_HOME;
+  in[1].ki.dwFlags = KEYEVENTF_EXTENDEDKEY;
+  // Release Home
+  in[2] = in[1];
+  in[2].ki.dwFlags = KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP;
+  // Release Ctrl
+  in[3] = in[0];
+  in[3].ki.dwFlags = KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP;
+  SendInput(4, in, sizeof(INPUT));
+}
+
+static LRESULT CALLBACK ScrollTopMouseProc(int nCode, WPARAM wParam,
+                                            LPARAM lParam) {
+  if (nCode == HC_ACTION && wParam == WM_LBUTTONUP) {
+    auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
+    // Two-stage check: cheap bounds test first, then UIA only if needed.
+    if (IsInTabBarArea(ms->pt) && IsOnActiveTab(ms->pt))
+      SendScrollToTop();
+  }
+  return CallNextHookEx(g_scroll_hook, nCode, wParam, lParam);
+}
+
+// Dedicated thread: owns COM + UIA instance + WH_MOUSE_LL + message pump.
+static DWORD WINAPI ScrollTopThread(LPVOID) {
+  // STA required by WH_MOUSE_LL (hook callback must pump messages on this
+  // thread), and UIAutomation works fine in STA.
+  if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)))
+    return 1;
+
+  if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr,
+                                  CLSCTX_INPROC_SERVER,
+                                  IID_IUIAutomation,
+                                  reinterpret_cast<void**>(&g_uia)))) {
+    g_scroll_hook = SetWindowsHookExW(WH_MOUSE_LL, ScrollTopMouseProc,
+                                       nullptr, 0);
+    // Message pump — required for WH_MOUSE_LL callbacks to fire.
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0))
+      DispatchMessageW(&msg);
+
+    if (g_scroll_hook) {
+      UnhookWindowsHookEx(g_scroll_hook);
+      g_scroll_hook = nullptr;
+    }
+    g_uia->Release();
+    g_uia = nullptr;
+  }
+
+  CoUninitialize();
+  return 0;
+}
+
+static void InstallTabScrollTop() {
+  // Default on (=1); set click_tab_scroll_top=0 in [tabs] to disable.
+  if (!GetPrivateProfileIntW(L"tabs", L"click_tab_scroll_top", 1,
+                              GetIniPath().c_str()))
+    return;
+  HANDLE t = CreateThread(nullptr, 0, ScrollTopThread, nullptr, 0, nullptr);
+  if (t) CloseHandle(t);
 }
 
 // ============================================================
