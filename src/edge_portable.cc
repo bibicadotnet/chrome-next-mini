@@ -711,11 +711,24 @@ static void SendScrollToTop() {
 
 static LRESULT CALLBACK ScrollTopMouseProc(int nCode, WPARAM wParam,
                                             LPARAM lParam) {
-  if (nCode == HC_ACTION && wParam == WM_LBUTTONUP) {
+  if (nCode == HC_ACTION) {
     auto* ms = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
-    // Two-stage check: cheap bounds test first, then UIA only if needed.
-    if (IsInTabBarArea(ms->pt) && IsOnActiveTab(ms->pt))
-      SendScrollToTop();
+
+    // Must check at LBUTTONDOWN — by LBUTTONUP Chrome has already switched
+    // tabs, making the newly-active tab appear selected (false positive).
+    static bool s_down_on_active_tab = false;
+
+    if (wParam == WM_LBUTTONDOWN) {
+      s_down_on_active_tab = IsInTabBarArea(ms->pt) && IsOnActiveTab(ms->pt);
+    } else if (wParam == WM_LBUTTONUP) {
+      if (s_down_on_active_tab && IsInTabBarArea(ms->pt))
+        SendScrollToTop();
+      s_down_on_active_tab = false;
+    } else if (wParam == WM_MOUSEMOVE && s_down_on_active_tab) {
+      // Cancel if the mouse dragged away (tab drag operation)
+      if (!IsInTabBarArea(ms->pt))
+        s_down_on_active_tab = false;
+    }
   }
   return CallNextHookEx(g_scroll_hook, nCode, wParam, lParam);
 }
