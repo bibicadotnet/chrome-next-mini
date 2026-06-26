@@ -538,7 +538,8 @@ static std::wstring GetCommand(LPWSTR param) {
   return result;
 }
 
-// ============================================================
+static void InstallTabScrollTop();  // defined below DllMain section
+
 // Entry point hook — mirrors chrome++.cc / portable.cc
 // ============================================================
 using Startup = int (*)();
