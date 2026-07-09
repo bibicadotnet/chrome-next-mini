@@ -204,6 +204,36 @@ static BOOL WINAPI MyCryptUnprotectData(
 }
 
 // ============================================================
+// MakeGreen — bundles FakeGetComputerName, FakeGetVolumeInformation,
+// MyUpdateProcThreadAttribute, MyCryptProtectData, MyCryptUnprotectData.
+//
+// Mirrors chrome_plus's green.cc MakeGreen(): this must only ever be
+// called for the main browser process (see Loader() below), never
+// unconditionally from DllMain. Attaching these hooks in every process
+// image loads version.dll into (renderer, GPU, utility, crashpad-handler,
+// ...) is NOT what the upstream project does and must be avoided —
+// MyUpdateProcThreadAttribute in particular affects every child process
+// spawn made by whichever process it runs in, so it must stay scoped to
+// the single browser process that actually spawns children on behalf of
+// the user.
+// ============================================================
+static void MakeGreen() {
+  DetourTransactionBegin();
+  DetourUpdateThread(GetCurrentThread());
+  DetourAttach(reinterpret_cast<LPVOID*>(&RawGetComputerNameW),
+               reinterpret_cast<void*>(FakeGetComputerName));
+  DetourAttach(reinterpret_cast<LPVOID*>(&RawGetVolumeInformationW),
+               reinterpret_cast<void*>(FakeGetVolumeInformation));
+  DetourAttach(reinterpret_cast<LPVOID*>(&RawUpdateProcThreadAttribute),
+               reinterpret_cast<void*>(MyUpdateProcThreadAttribute));
+  DetourAttach(reinterpret_cast<LPVOID*>(&RawCryptProtectData),
+               reinterpret_cast<void*>(MyCryptProtectData));
+  DetourAttach(reinterpret_cast<LPVOID*>(&RawCryptUnprotectData),
+               reinterpret_cast<void*>(MyCryptUnprotectData));
+  DetourTransactionCommit();
+}
+
+// ============================================================
 // AppId — unique AppUserModelID per install directory
 // Prevents multiple portable instances from merging in taskbar
 // ============================================================
@@ -569,8 +599,12 @@ static int Loader() {
         ExitProcess(0);
       }
     }
-    // Second launch (--portable present): run normally
+    // Second launch (--portable present): run normally.
+    // This is the ChromePlus()-equivalent path — everything here runs
+    // exactly once, in the main browser process only, never in a
+    // renderer/GPU/utility/crashpad-handler process.
     SetAppId();
+    MakeGreen();
     IgnorePolicies();
     SuppressFalseUpgradeNotification();
   }
@@ -632,22 +666,20 @@ BOOL WINAPI DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID) {
   if (dwReason == DLL_PROCESS_ATTACH) {
     DisableThreadLibraryCalls(hModule);
 
+    // Maintain the original function of version.dll. This runs in every
+    // process the DLL is loaded into (browser, renderer, GPU, utility,
+    // crashpad-handler, ...) because every one of them still needs the
+    // real GetFileVersionInfo*/Ver* exports to keep working — same as
+    // chrome++.cc's DllMain.
     LoadSysDll(hModule);
 
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-    DetourAttach(reinterpret_cast<LPVOID*>(&RawGetComputerNameW),
-                 reinterpret_cast<void*>(FakeGetComputerName));
-    DetourAttach(reinterpret_cast<LPVOID*>(&RawGetVolumeInformationW),
-                 reinterpret_cast<void*>(FakeGetVolumeInformation));
-    DetourAttach(reinterpret_cast<LPVOID*>(&RawUpdateProcThreadAttribute),
-                 reinterpret_cast<void*>(MyUpdateProcThreadAttribute));
-    DetourAttach(reinterpret_cast<LPVOID*>(&RawCryptProtectData),
-                 reinterpret_cast<void*>(MyCryptProtectData));
-    DetourAttach(reinterpret_cast<LPVOID*>(&RawCryptUnprotectData),
-                 reinterpret_cast<void*>(MyCryptUnprotectData));
-    DetourTransactionCommit();
-
+    // Detour the exe's entry point. The actual hook set (MakeGreen,
+    // SetAppId, IgnorePolicies, SuppressFalseUpgradeNotification) is
+    // decided later, inside Loader(), once the command line can be
+    // inspected for "-type=" / "--portable" — exactly mirroring
+    // chrome++.cc's InstallLoader()/Loader()/ChromePlusCommand() split.
+    // No hook other than the entry-point detour and the version.dll
+    // passthrough may be attached unconditionally here.
     InstallLoader();
   }
   return TRUE;
