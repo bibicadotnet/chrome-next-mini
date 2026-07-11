@@ -379,7 +379,8 @@ static bool IsPolicyKey(LPCWSTR lpSubKey) {
   return StrStrIW(lpSubKey, L"Policies\\Google\\Chrome") ||
          StrStrIW(lpSubKey, L"Policies\\Microsoft\\Edge") ||
          StrStrIW(lpSubKey, L"Policies\\Chromium") ||
-         StrStrIW(lpSubKey, L"Policies\\BraveSoftware\\Brave");
+         StrStrIW(lpSubKey, L"Policies\\BraveSoftware\\Brave") ||
+         StrStrIW(lpSubKey, L"Policies\\CocCoc");
 }
 
 // ============================================================
@@ -420,12 +421,58 @@ static std::wstring RunningChromeVersion() {
   return cached;
 }
 
+// Vendor policy path prefixes we intercept.
+static const wchar_t* const kPolicyPatterns[] = {
+    L"Policies\\Google\\Chrome",
+    L"Policies\\Microsoft\\Edge",
+    L"Policies\\Chromium",
+    L"Policies\\BraveSoftware\\Brave",
+    L"Policies\\CocCoc",
+};
+
+// Reads general.policy_key from chrome++.ini. When non-empty, policy
+// registry reads for THIS portable instance are redirected from the shared
+// vendor key (e.g. Policies\Microsoft\Edge) to an isolated sibling key
+// (e.g. Policies\Microsoft\Edge_<policy_key>). This lets multiple portable
+// installs (different Edge/Chrome versions) each point at their own
+// private set of "regedit" policies without colliding on the one shared
+// key Windows normally uses.
+static std::wstring GetPolicyKeySuffix() {
+  return GetIniString(L"general", L"policy_key");
+}
+
+// Rewrites lpSubKey so the matched vendor policy pattern gets `_<suffix>`
+// appended right after it, preserving anything that follows (e.g.
+// "...\Edge\Recommended" -> "...\Edge_v139\Recommended").
+static std::wstring RedirectPolicySubKey(LPCWSTR lpSubKey,
+                                          const std::wstring& suffix) {
+  std::wstring sub(lpSubKey ? lpSubKey : L"");
+  for (const wchar_t* pattern : kPolicyPatterns) {
+    LPCWSTR found = StrStrIW(sub.c_str(), pattern);
+    if (!found) continue;
+    const size_t pos = found - sub.c_str();
+    const size_t pattern_len = wcslen(pattern);
+    return sub.substr(0, pos + pattern_len) + L"_" + suffix +
+           sub.substr(pos + pattern_len);
+  }
+  return sub;
+}
+
 static LSTATUS APIENTRY MyRegOpenKeyExW(HKEY hKey, LPCWSTR lpSubKey,
                                          DWORD ulOptions, REGSAM samDesired,
                                          PHKEY phkResult) {
   if ((hKey == HKEY_LOCAL_MACHINE || hKey == HKEY_CURRENT_USER) &&
-      IsPolicyKey(lpSubKey))
-    return ERROR_FILE_NOT_FOUND;
+      IsPolicyKey(lpSubKey)) {
+    if (GetIniString(L"general", L"ignore_policies") == L"1")
+      return ERROR_FILE_NOT_FOUND;
+
+    const std::wstring suffix = GetPolicyKeySuffix();
+    if (!suffix.empty()) {
+      const std::wstring redirected = RedirectPolicySubKey(lpSubKey, suffix);
+      return RawRegOpenKeyExW(hKey, redirected.c_str(), ulOptions,
+                               samDesired, phkResult);
+    }
+  }
   return RawRegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired, phkResult);
 }
 
@@ -476,7 +523,9 @@ static LSTATUS APIENTRY MyRegOpenKeyExW_Upgrade(HKEY hKey, LPCWSTR lpSubKey,
 }
 
 static void IgnorePolicies() {
-  if (GetIniString(L"general", L"ignore_policies") != L"1") return;
+  const bool ignore = GetIniString(L"general", L"ignore_policies") == L"1";
+  const bool redirect = !GetPolicyKeySuffix().empty();
+  if (!ignore && !redirect) return;
   DetourTransactionBegin();
   DetourUpdateThread(GetCurrentThread());
   DetourAttach(reinterpret_cast<LPVOID*>(&RawRegOpenKeyExW),
