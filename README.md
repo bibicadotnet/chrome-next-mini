@@ -24,10 +24,14 @@ cache_dir=%app%\..\Cache
 command_line=
 ignore_policies=0
 win32k=0
+policy_key=Portable
 ```
-- 2 tính năng ignore_policies và win32k mặc định tắt
-- ignore_policies giữ lại, phòng tình huống bạn cần 1 bản portable tách rời hoàn toàn với các cấu hình regedit (`ignore_policies=1` sẽ không dùng các cấu hình trong regedit)
-- win32k giữ lại vì không chắc Chromium gặp sự cố nào khi khởi động không (nếu bật trình duyệt, thấy crash ngay, đổi sang `win32k=1`)
+- `ignore_policies` giữ lại, phòng tình huống bạn cần 1 bản portable tách rời hoàn toàn với các cấu hình regedit (`ignore_policies=1` sẽ không dùng các cấu hình trong regedit)
+- `win32k` giữ lại vì không chắc Chromium gặp sự cố nào khi khởi động không (nếu bật trình duyệt, thấy crash ngay, đổi sang `win32k=1`)
+- `policy_key=Portable`: đây là tính năng mới được thêm vào cho Chrome++ Next Mini. Tác dụng của nó là điều hướng trình duyệt đọc cấu hình Registry ở một nhánh riêng biệt, không sử dụng chung nhánh mặc định của hệ thống.
+  - Lấy ví dụ trên trình duyệt Edge, mặc định cả bản cài đặt (Default) và bản Portable đều dùng chung một nhánh Registry là `[HKEY_CURRENT_USER\SOFTWARE\Policies\Microsoft\Edge]`
+  - Tình huống xảy ra khi bạn muốn chạy song song nhiều bản Edge (cả bản cài đặt gốc lẫn bản Portable), hoặc dùng nhiều phiên bản Portable khác nhau (v110, v138, v150...). Do các phiên bản hỗ trợ các policy khác nhau, việc dùng chung một nhánh Registry sẽ gây xung đột hoặc lỗi policy. `policy_key` giúp mỗi bản Portable trỏ tới một nhánh cấu hình riêng để tùy chỉnh độc lập, giải quyết triệt để tình trạng đụng độ này.
+  - Khi cấu hình `policy_key=Portable` trong file `chrome++.ini`, bản Edge Portable đó thay vì đọc ở nhánh gốc sẽ tự động chuyển hướng sang nhánh mới là `[HKEY_CURRENT_USER\SOFTWARE\Policies\Microsoft\Edge_Portable]`. Tương tự, nếu bạn đặt `policy_key=v138`, nhánh Registry sẽ trở thành `[...\Edge_v138]`.
 
 Beta test, không chắc Edge khi chạy 1 thời gian có bị lỗi như bản Chrome++ Next gốc không, nghi ngờ khả năng chạy mặc định `App-Bound Encryption` có thể tạo ra tình huống crash ngẫu nhiên, đợt thử nghiệm này tắt đi xem thế nào
 
