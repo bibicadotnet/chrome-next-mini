@@ -6,7 +6,7 @@ Phiên bản tối giản của [Chrome++ Next](https://github.com/Bush2021/chro
 ### Cài đặt
 Download edge_portable-*.zip tại release, giải nén
 
-- Trên Chromium/Chrome/Cốc Cốc ... chép 2 file `chrome++.ini` và `version.dll` trong cùng thư mục với `chrome.exe`
+- Trên Chromium/Chrome/Helium/Thorium/Cốc Cốc ... chép 2 file `chrome++.ini` và `version.dll` trong cùng thư mục với `chrome.exe`
 - Trên Edge, chép 3 file `chrome++.ini`, `setdll-x64.exe`, `version.dll` trong cùng thư mục với `msedge.exe`, sau đó gọi PowerShell, chạy lệnh `./setdll-x64.exe /d:version.dll msedge.exe`
 
 Do phương pháp patch để chạy ở chế độ di động, Microsoft Defender Antivirus đôi khi có thể nhận diện nhầm nó là một phần mềm độc hại / trojan / visrus  (thường sau 3-7 ngày, khi Microsoft cập nhập dữ liệu, sẽ hết cảnh báo)
