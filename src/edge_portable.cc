@@ -516,8 +516,12 @@ static LSTATUS APIENTRY MyRegOpenKeyExW_Upgrade(HKEY hKey, LPCWSTR lpSubKey,
       RawRegOpenKeyExW_Upgrade(hKey, lpSubKey, ulOptions, samDesired, phkResult);
   if (result != ERROR_SUCCESS && phkResult && lpSubKey &&
       StrStrIW(lpSubKey, L"Google\\Update\\Clients\\")) {
-    RawRegOpenKeyExW_Upgrade(hKey, L"", 0, samDesired, phkResult);
-    return ERROR_SUCCESS;
+    if (RawRegOpenKeyExW_Upgrade(hKey, L"", 0, samDesired, phkResult) ==
+        ERROR_SUCCESS) {
+      return ERROR_SUCCESS;
+    }
+    // Fallback also failed: fall through and return the original error
+    // instead of reporting success with an invalid phkResult.
   }
   return result;
 }
@@ -546,16 +550,83 @@ static void SuppressFalseUpgradeNotification() {
 // ============================================================
 // Command-line builder — mirrors portable.cc logic
 // ============================================================
-static std::wstring GetCommand(LPWSTR param) {
-  int argc = 0;
-  LPWSTR* argv = CommandLineToArgvW(param, &argc);
+static bool IsWhitespaceChar(wchar_t ch) {
+  return ch == L' ' || ch == L'\t' || ch == L'\n' || ch == L'\r';
+}
 
-  std::vector<std::wstring> args;
-  args.reserve(argc + 16);
+// Finds `flag` as a whole "word" in `command_line` (bounded by whitespace or
+// string edges), so "--foo" doesn't spuriously match inside "--foobar".
+static size_t FindStandaloneSwitch(std::wstring_view command_line,
+                                    std::wstring_view flag) {
+  size_t pos = command_line.find(flag);
+  while (pos != std::wstring_view::npos) {
+    const bool at_start = pos == 0 || IsWhitespaceChar(command_line[pos - 1]);
+    const size_t after = pos + flag.size();
+    const bool at_end =
+        after >= command_line.size() || IsWhitespaceChar(command_line[after]);
+    if (at_start && at_end) return pos;
+    pos = command_line.find(flag, pos + flag.size());
+  }
+  return std::wstring_view::npos;
+}
+
+static void TrimTrailingWhitespace(std::wstring& text) {
+  while (!text.empty() && IsWhitespaceChar(text.back())) text.pop_back();
+}
+
+// The `--single-argument` switch is used by the Windows Shell for file
+// associations. CommandLineToArgvW can mis-split the argument that follows
+// it (typically a file path with spaces), so split it out here: the part
+// before the switch gets parsed/modified as usual, while the switch and its
+// entire trailing argument are appended verbatim at the very end. Mirrors
+// portable.cc's SplitSingleArgumentSwitch (fix for chrome_plus issue #181).
+static std::pair<std::wstring, std::wstring> SplitSingleArgumentSwitch(
+    const std::wstring& command_line) {
+  constexpr std::wstring_view kSingleArgument = L"--single-argument";
+  const size_t pos = FindStandaloneSwitch(command_line, kSingleArgument);
+  if (pos == std::wstring_view::npos) return {command_line, L""};
+
+  std::wstring prefix = command_line.substr(0, pos);
+  std::wstring suffix = command_line.substr(pos);
+  TrimTrailingWhitespace(prefix);
+  return {std::move(prefix), std::move(suffix)};
+}
+
+// Separates arguments before and after a lone "--" sentinel. Everything
+// after it is positional (e.g. a URL) and must be preserved verbatim at the
+// end of the final command line, not merged with --disable-features / etc.
+// Mirrors portable.cc's SeparateSentinelArgs.
+static std::pair<std::vector<std::wstring>, std::vector<std::wstring>>
+SeparateSentinelArgs(std::vector<std::wstring> args) {
+  size_t sentinel = args.size();
+  for (size_t i = 0; i < args.size(); ++i) {
+    if (args[i] == L"--") { sentinel = i; break; }
+  }
+  if (sentinel == args.size()) return {std::move(args), {}};
+
+  std::vector<std::wstring> trailing(args.begin() + sentinel, args.end());
+  args.erase(args.begin() + sentinel, args.end());
+  return {std::move(args), std::move(trailing)};
+}
+
+static std::wstring GetCommand(LPWSTR param) {
+  // Split off any "--single-argument <path>" tail before touching the rest.
+  auto [command_line, single_arg_suffix] =
+      SplitSingleArgumentSwitch(param ? param : L"");
+
+  int argc = 0;
+  LPWSTR* argv = CommandLineToArgvW(command_line.c_str(), &argc);
+
+  std::vector<std::wstring> raw_args;
+  raw_args.reserve(argc + 16);
   // skip argv[0] (exe path)
   for (int i = 1; i < argc; ++i)
-    args.emplace_back(argv[i]);
+    raw_args.emplace_back(argv[i]);
   if (argv) LocalFree(argv);
+
+  // Split off anything after a lone "--" sentinel; it must stay positional
+  // and untouched at the end of the final command line.
+  auto [args, trailing_args] = SeparateSentinelArgs(std::move(raw_args));
 
   // Append args from ini command_line=
   std::wstring extra = GetIniString(L"general", L"command_line");
@@ -574,7 +645,7 @@ static std::wstring GetCommand(LPWSTR param) {
   std::wstring combined_disable;
   std::wstring combined_enable;
   std::vector<std::wstring> final_args;
-  final_args.reserve(args.size() + 4);
+  final_args.reserve(args.size() + trailing_args.size() + 4);
   bool has_user_data  = false;
   bool has_disk_cache = false;
 
@@ -592,8 +663,12 @@ static std::wstring GetCommand(LPWSTR param) {
     }
   }
 
+  // OutdatedBuildDetector is disabled by default here (unlike upstream
+  // chrome_plus, which leaves it enabled) so the "build is outdated, please
+  // relaunch" prompt never shows on portable installs that can't
+  // self-update — intentional for this fork, not a bug.
   if (!combined_disable.empty()) combined_disable += L',';
-  combined_disable += L"OutdatedBuildDetector,WinSboxNoFakeGdiInit,WebUIInProcessResourceLoading";
+  combined_disable += L"OutdatedBuildDetector,WinSboxNoFakeGdiInit";
   final_args.emplace_back(L"--disable-features=" + combined_disable);
 
   if (!combined_enable.empty())
@@ -608,10 +683,19 @@ static std::wstring GetCommand(LPWSTR param) {
     if (!c.empty()) final_args.emplace_back(L"--disk-cache-dir=" + ExpandPath(c));
   }
 
+  // Re-attach the "--" sentinel and anything positional after it, verbatim.
+  for (auto& t : trailing_args) final_args.push_back(std::move(t));
+
   std::wstring result;
   for (auto& a : final_args) {
     if (!result.empty()) result += L' ';
     result += QuoteIfNeeded(a);
+  }
+
+  // Re-attach the "--single-argument <path>" tail, verbatim, at the very end.
+  if (!single_arg_suffix.empty()) {
+    if (!result.empty()) result += L' ';
+    result += single_arg_suffix;
   }
   return result;
 }
