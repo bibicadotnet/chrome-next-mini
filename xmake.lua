@@ -1,4 +1,12 @@
+local APP_VERSION = "1.0.7"
+local ver = APP_VERSION:split("%.")  -- {"1", "0", "7"}
+local VER_MAJOR = ver[1] or "1"
+local VER_MINOR = ver[2] or "0"
+local VER_PATCH = ver[3] or "0"
+
 add_rules("mode.debug", "mode.release")
+
+set_targetdir("$(builddir)/$(mode)")
 
 set_warnings("more")
 
@@ -46,16 +54,20 @@ target("detours")
 -- Main DLL
 target("edge_portable")
     set_kind("shared")
-    set_targetdir("$(builddir)/$(mode)")
     set_basename("version")
     add_deps("detours")
-    add_files("src/edge_portable.cc")
+    add_files("src/edge_portable.cc", "src/version.rc")
     add_links("shlwapi", "crypt32", "psapi", "shell32", "propsys", "ole32", "advapi32", "user32")
+    add_defines(
+        "VER_MAJOR=" .. VER_MAJOR,
+        "VER_MINOR=" .. VER_MINOR,
+        "VER_PATCH=" .. VER_PATCH,
+        'VER_STR="' .. APP_VERSION .. '"'
+    )
 
 -- setdll tool from Detours
 target("setdll")
     set_kind("binary")
-    set_targetdir("$(builddir)/$(mode)")
     set_basename("setdll-x64")
     add_deps("detours")
     add_files("detours/samples/setdll/setdll.cpp")
