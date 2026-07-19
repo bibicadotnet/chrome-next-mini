@@ -5,10 +5,6 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag (vd: v1.0.0)"
-        required: true
 
 permissions:
   contents: write
@@ -30,13 +26,24 @@ jobs:
       - name: Configure
         run: xmake f -p windows -a x64 -m release
 
+      - name: Resolve tag
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $ver = (Get-Content xmake.lua | Select-String 'APP_VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+            $tag = "v$ver"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          echo "TAG=$tag" >> $env:GITHUB_ENV
+
       - name: Build
         run: xmake
 
       - name: Package
         shell: pwsh
         run: |
-          $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
+          $tag = $env:TAG
           $out = "edge_portable-$tag"
           New-Item -ItemType Directory $out
           Copy-Item build\release\version.dll  $out\
@@ -44,7 +51,6 @@ jobs:
           Copy-Item chrome++.ini               $out\
           Get-ChildItem README.md -ErrorAction SilentlyContinue | Copy-Item -Destination $out\
           Compress-Archive -Path $out -DestinationPath "$out.zip"
-          echo "TAG=$tag" >> $env:GITHUB_ENV
 
       - name: Release
         uses: softprops/action-gh-release@v2
