@@ -380,7 +380,8 @@ static bool IsPolicyKey(LPCWSTR lpSubKey) {
          StrStrIW(lpSubKey, L"Policies\\Microsoft\\Edge") ||
          StrStrIW(lpSubKey, L"Policies\\Chromium") ||
          StrStrIW(lpSubKey, L"Policies\\BraveSoftware\\Brave") ||
-         StrStrIW(lpSubKey, L"Policies\\CocCoc");
+         StrStrIW(lpSubKey, L"Policies\\CocCoc") ||
+         StrStrIW(lpSubKey, L"Policies\\CatsxpSoftware\\Catsxp");
 }
 
 // ============================================================
@@ -428,6 +429,7 @@ static const wchar_t* const kPolicyPatterns[] = {
     L"Policies\\Chromium",
     L"Policies\\BraveSoftware\\Brave",
     L"Policies\\CocCoc",
+    L"Policies\\CatsxpSoftware\\Catsxp",
 };
 
 // Reads general.policy_key from chrome++.ini. When non-empty, policy
