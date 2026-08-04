@@ -58,3 +58,12 @@ jobs:
           tag_name: ${{ env.TAG }}
           files: edge_portable-${{ env.TAG }}.zip
           generate_release_notes: true
+
+      - name: Scan with VirusTotal
+        uses: crazy-max/ghaction-virustotal@v4
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          update_release_body: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          files: |
+            edge_portable-${{ env.TAG }}.zip
