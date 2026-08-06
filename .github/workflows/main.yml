@@ -66,4 +66,4 @@ jobs:
           update_release_body: true
           github_token: ${{ secrets.GITHUB_TOKEN }}
           files: |
-            edge_portable-${{ env.TAG }}.zip
+            build/release/version.dll
