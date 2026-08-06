@@ -67,3 +67,24 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           files: |
             build/release/version.dll
+
+      - name: Submit to Microsoft via Defender cloud
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $false
+          Set-MpPreference -MAPSReporting Advanced
+          Set-MpPreference -SubmitSamplesConsent SendAllSamples
+
+          $status = Get-MpComputerStatus
+          Write-Host "RealTimeProtectionEnabled: $($status.RealTimeProtectionEnabled)"
+          Write-Host "AMServiceEnabled: $($status.AMServiceEnabled)"
+
+          if (-not $status.RealTimeProtectionEnabled) {
+            Write-Warning "Real-time protection could not be enabled on this runner. Automatic sample submission will not trigger."
+          }
+
+          # Force Defender to scan this file, which triggers a cloud lookup and,
+          # if the file looks suspicious, an automatic sample submission to Microsoft.
+          Start-MpScan -ScanType CustomScan -ScanPath (Resolve-Path "build\release\version.dll").Path
+
+          Write-Host "Requested Defender cloud analysis and sample submission for version.dll"
