@@ -5,7 +5,7 @@ Phiên bản tối giản, dùng các logic có sẵn từ [Chrome++ Next](https
 
 - Chỉ giữ lại tính năng Portable, loại bỏ phần lớn tính năng nâng cao của bản gốc Chrome++
   
-Phiên bản ổn định hiện tại v1.0.7, gần như không cần bảo trì, trừ khi lõi Chromium thay đổi hoàn toàn cấu trúc
+Phiên bản ổn định hiện tại v1.0.8, gần như không cần bảo trì, trừ khi lõi Chromium thay đổi hoàn toàn cấu trúc
 
 ### Cài đặt và sử dụng
 Download edge_portable-*.zip tại release, giải nén
