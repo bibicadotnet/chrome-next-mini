@@ -1,4 +1,4 @@
-local APP_VERSION = "1.0.7"
+local APP_VERSION = "1.0.8"
 local ver = APP_VERSION:split("%.")  -- {"1", "0", "7"}
 local VER_MAJOR = ver[1] or "1"
 local VER_MINOR = ver[2] or "0"
